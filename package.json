@@ -1,0 +1,110 @@
+{
+  "name": "kbsearch-extension",
+  "displayName": "KB Search Mention",
+  "description": "Adds an @knowledge chat participant for internal knowledge queries.",
+  "version": "0.0.6",
+  "publisher": "local",
+  "repository": {
+    "type": "git",
+    "url": "file:///Users/jbromfield/workspace/kbsearch-extension"
+  },
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.97.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onChatParticipant:kbsearch-extension.knowledge"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "kbsearch-extension.knowledge",
+        "name": "knowledge",
+        "fullName": "Internal Knowledge",
+        "description": "Ask questions using internal knowledge context.",
+        "isSticky": true
+      }
+    ],
+    "configuration": {
+      "title": "KB Search",
+      "properties": {
+        "kbsearch.ragUrl": {
+          "deprecationMessage": "Use kbsearch.mcpUrl instead.",
+          "type": "string",
+          "default": "http://localhost:8000/query",
+          "description": "Deprecated. Direct RAG endpoint was replaced by MCP tool invocation."
+        },
+        "kbsearch.mcpUrl": {
+          "type": "string",
+          "default": "http://localhost:8080/mcp",
+          "description": "MCP endpoint used by @knowledge."
+        },
+        "kbsearch.mcpServerName": {
+          "type": "string",
+          "default": "cicd-mcp",
+          "description": "Server key in user mcp.json used for default URL sync."
+        },
+        "kbsearch.syncMcpConfigOnInstall": {
+          "type": "boolean",
+          "default": true,
+          "description": "On first activation, sync settings from user mcp.json and create the server entry if missing."
+        },
+        "kbsearch.toolName": {
+          "type": "string",
+          "default": "search_knowledge_base",
+          "description": "MCP tool name invoked by @knowledge."
+        },
+        "kbsearch.githubUserHeader": {
+          "type": "string",
+          "default": "",
+          "description": "Optional X-GitHub-User header sent to MCP endpoint."
+        },
+        "kbsearch.profile": {
+          "type": "string",
+          "default": "default",
+          "description": "Profile argument passed to the MCP tool."
+        },
+        "kbsearch.topK": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "description": "top_k argument passed to the MCP tool."
+        },
+        "kbsearch.minScore": {
+          "deprecationMessage": "minScore filtering now belongs in the MCP server tool logic.",
+          "type": "number",
+          "default": 0.01,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Deprecated. Relevance filtering should be configured in MCP tool backend."
+        },
+        "kbsearch.includeSources": {
+          "type": "boolean",
+          "default": true,
+          "description": "include_sources argument passed to the MCP tool."
+        },
+        "kbsearch.summarizeWithCopilot": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use Copilot model to summarize retrieved MCP tool output before replying."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "2.24.0",
+    "@types/node": "^20.16.5",
+    "@types/vscode": "^1.97.0",
+    "typescript": "^5.6.2"
+  }
+}
