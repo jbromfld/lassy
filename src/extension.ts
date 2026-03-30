@@ -1,519 +1,218 @@
 import * as vscode from "vscode";
-import * as os from "os";
-import * as path from "path";
-import { promises as fs } from "fs";
+
+// ---------------------------------------------------------------------------
+// MCP JSON-RPC helpers
+// ---------------------------------------------------------------------------
 
 type JsonRpcResponse<T> = {
   id?: string | number | null;
   result?: T;
-  error?: {
-    code: number;
-    message: string;
-    data?: unknown;
-  };
+  error?: { code: number; message: string; data?: unknown };
 };
 
-type MpcToolInfo = {
-  name: string;
-  inputSchema?: {
-    properties?: Record<string, unknown>;
-    required?: string[];
-  };
+const MCP_HEADERS = {
+  "Content-Type": "application/json",
+  "Accept": "application/json, text/event-stream",
+  "MCP-Protocol-Version": "2024-11-05",
 };
-
-type MpcToolsListResult = {
-  tools?: MpcToolInfo[];
-};
-
-type UserMcpServerConfig = {
-  url?: string;
-  type?: string;
-  description?: string;
-};
-
-type UserMcpConfig = {
-  servers?: Record<string, UserMcpServerConfig>;
-  inputs?: unknown[];
-};
-
-const FIRST_RUN_SYNC_KEY = "kbsearch.firstRunSyncDone";
 
 function getConfig() {
   const cfg = vscode.workspace.getConfiguration("kbsearch");
   return {
     mcpUrl: cfg.get<string>("mcpUrl", "http://localhost:8080/mcp"),
-    mcpServerName: cfg.get<string>("mcpServerName", "cicd-mcp"),
     toolName: cfg.get<string>("toolName", "search_knowledge_base"),
-    githubUserHeader: cfg.get<string>("githubUserHeader", ""),
     profile: cfg.get<string>("profile", "default"),
     topK: cfg.get<number>("topK", 5),
-    includeSources: cfg.get<boolean>("includeSources", true),
-    summarizeWithCopilot: cfg.get<boolean>("summarizeWithCopilot", true),
-    syncMcpConfigOnInstall: cfg.get<boolean>("syncMcpConfigOnInstall", true)
   };
 }
 
-function getUserMcpConfigPath(): string {
-  const home = os.homedir();
-  if (process.platform === "darwin") {
-    return path.join(home, "Library", "Application Support", "Code", "User", "mcp.json");
-  }
-  if (process.platform === "win32") {
-    const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
-    return path.join(appData, "Code", "User", "mcp.json");
-  }
-  return path.join(home, ".config", "Code", "User", "mcp.json");
-}
-
-async function readUserMcpConfig(filePath: string): Promise<UserMcpConfig> {
-  try {
-    const text = await fs.readFile(filePath, "utf8");
-    const parsed = JSON.parse(text) as UserMcpConfig;
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-async function writeUserMcpConfig(filePath: string, config: UserMcpConfig): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-}
-
-async function ensureFirstRunMcpSync(context: vscode.ExtensionContext): Promise<void> {
-  const { mcpServerName, mcpUrl, syncMcpConfigOnInstall } = getConfig();
-  if (!syncMcpConfigOnInstall) {
-    return;
-  }
-
-  const alreadySynced = context.globalState.get<boolean>(FIRST_RUN_SYNC_KEY, false);
-  if (alreadySynced) {
-    return;
-  }
-
-  const cfg = vscode.workspace.getConfiguration("kbsearch");
-  const userMcpPath = getUserMcpConfigPath();
-  const mcpConfig = await readUserMcpConfig(userMcpPath);
-  const servers = mcpConfig.servers ?? {};
-  const existingServer = servers[mcpServerName] ?? {};
-
-  const configuredMcpUrl = cfg.inspect<string>("mcpUrl");
-  const hasExplicitMcpUrl = Boolean(
-    configuredMcpUrl?.workspaceFolderValue
-    || configuredMcpUrl?.workspaceValue
-    || configuredMcpUrl?.globalValue
-  );
-
-  if (!hasExplicitMcpUrl && existingServer.url) {
-    await cfg.update("mcpUrl", existingServer.url, vscode.ConfigurationTarget.Global);
-  }
-
-  if (!servers[mcpServerName]) {
-    servers[mcpServerName] = {
-      url: (existingServer.url || mcpUrl),
-      type: "sse",
-      description: "MCP server with RAG search and CI/CD query tools"
-    };
-    await writeUserMcpConfig(userMcpPath, {
-      ...mcpConfig,
-      servers,
-      inputs: mcpConfig.inputs ?? []
-    });
-  }
-
-  await context.globalState.update(FIRST_RUN_SYNC_KEY, true);
-}
-
-function getSessionHeaderValue(response: Response): string {
-  return response.headers.get("mcp-session-id")
-    ?? response.headers.get("Mcp-Session-Id")
-    ?? response.headers.get("MCP-Session-Id")
-    ?? "";
-}
-
-async function callJsonRpc<T>(
+/** Send a JSON-RPC request and return the parsed response. */
+async function rpc<T>(
   url: string,
-  payload: unknown,
+  payload: object,
   headers: Record<string, string>,
-  signal: AbortSignal
+  signal: AbortSignal,
 ): Promise<{ body: JsonRpcResponse<T>; response: Response }> {
   const response = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "application/json, text/event-stream",
-      "MCP-Protocol-Version": "2024-11-05",
-      ...headers
-    },
+    headers: { ...MCP_HEADERS, ...headers },
     body: JSON.stringify(payload),
-    signal
+    signal,
   });
 
-  const body = await parseJsonRpcBody<T>(response, getPayloadId(payload));
+  const raw = await response.text();
+  if (!raw.trim()) {
+    return { body: {}, response };
+  }
+
+  const ct = (response.headers.get("content-type") || "").toLowerCase();
+  const isSse = ct.includes("text/event-stream") || raw.startsWith("event:") || raw.includes("\nevent:");
+
+  const body: JsonRpcResponse<T> = isSse
+    ? parseSsePayload(raw, (payload as { id?: unknown }).id)
+    : JSON.parse(raw);
+
   return { body, response };
 }
 
-function getPayloadId(payload: unknown): string | number | null | undefined {
-  if (!payload || typeof payload !== "object") {
-    return undefined;
-  }
-  if (!("id" in payload)) {
-    return undefined;
-  }
-  const id = (payload as { id?: unknown }).id;
-  if (typeof id === "string" || typeof id === "number" || id === null) {
-    return id;
-  }
-  return undefined;
-}
+/** Extract the first (or id-matched) JSON-RPC message from an SSE stream. */
+function parseSsePayload<T>(text: string, expectedId?: unknown): JsonRpcResponse<T> {
+  for (const block of text.split(/\r?\n\r?\n/)) {
+    const data = block
+      .split(/\r?\n/)
+      .filter((l) => l.startsWith("data:"))
+      .map((l) => l.slice(5).trimStart())
+      .join("\n")
+      .trim();
 
-async function parseJsonRpcBody<T>(
-  response: Response,
-  expectedId?: string | number | null
-): Promise<JsonRpcResponse<T>> {
-  const raw = await response.text();
-  if (!raw.trim()) {
-    return {};
-  }
-
-  const contentType = (response.headers.get("content-type") || "").toLowerCase();
-  const isSse = contentType.includes("text/event-stream") || raw.includes("\nevent:") || raw.startsWith("event:");
-
-  if (!isSse) {
-    return JSON.parse(raw) as JsonRpcResponse<T>;
-  }
-
-  return parseJsonRpcFromSse<T>(raw, expectedId);
-}
-
-function parseJsonRpcFromSse<T>(
-  sseText: string,
-  expectedId?: string | number | null
-): JsonRpcResponse<T> {
-  const events = sseText.split(/\r?\n\r?\n/);
-  const parsed: JsonRpcResponse<T>[] = [];
-
-  for (const eventBlock of events) {
-    const lines = eventBlock.split(/\r?\n/);
-    const dataLines = lines
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.slice(5).trimStart());
-
-    if (dataLines.length === 0) {
-      continue;
-    }
-
-    const dataPayload = dataLines.join("\n").trim();
-    if (!dataPayload || dataPayload === "[DONE]") {
-      continue;
-    }
+    if (!data || data === "[DONE]") { continue; }
 
     try {
-      const obj = JSON.parse(dataPayload) as JsonRpcResponse<T>;
-      parsed.push(obj);
-    } catch {
-      // Ignore non-JSON event payloads.
-    }
+      const obj = JSON.parse(data) as JsonRpcResponse<T>;
+      if (expectedId === undefined || obj.id === expectedId) { return obj; }
+    } catch { /* skip non-JSON */ }
   }
-
-  if (parsed.length === 0) {
-    throw new Error("MCP SSE response contained no JSON-RPC payload");
-  }
-
-  if (expectedId !== undefined) {
-    const matched = parsed.find((item) => item.id === expectedId);
-    if (matched) {
-      return matched;
-    }
-  }
-
-  return parsed[0];
+  throw new Error("MCP SSE response contained no JSON-RPC payload");
 }
 
-function extractToolText(toolResult: unknown): string {
-  if (typeof toolResult === "string") {
-    return toolResult;
-  }
+/** Extract text content from an MCP tool result. */
+function extractText(result: unknown): string {
+  if (typeof result === "string") { return result; }
+  if (!result || typeof result !== "object") { return JSON.stringify(result); }
 
-  if (!toolResult || typeof toolResult !== "object") {
-    return JSON.stringify(toolResult);
-  }
-
-  const maybeContent = (toolResult as { content?: unknown }).content;
-  if (Array.isArray(maybeContent)) {
-    const textParts = maybeContent
-      .map((item) => {
-        if (typeof item === "string") {
-          return item;
-        }
-        if (item && typeof item === "object" && "text" in item) {
-          const text = (item as { text?: unknown }).text;
-          return typeof text === "string" ? text : "";
-        }
-        return "";
-      })
+  const content = (result as { content?: unknown[] }).content;
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((c) => (c && typeof c === "object" && "text" in c ? String((c as { text: unknown }).text) : ""))
       .filter(Boolean);
-
-    if (textParts.length > 0) {
-      return textParts.join("\n\n");
-    }
+    if (parts.length) { return parts.join("\n\n"); }
   }
 
-  const maybeStructured = (toolResult as { structuredContent?: unknown }).structuredContent;
-  if (maybeStructured !== undefined) {
-    return JSON.stringify(maybeStructured, null, 2);
-  }
-
-  return JSON.stringify(toolResult, null, 2);
+  return JSON.stringify(result, null, 2);
 }
+
+// ---------------------------------------------------------------------------
+// MCP session: initialize → notify → tools/call
+// ---------------------------------------------------------------------------
 
 async function callMcpTool(
   mcpUrl: string,
   toolName: string,
   toolArgs: Record<string, unknown>,
-  includeSources: boolean,
-  githubUserHeader: string,
-  signal: AbortSignal
+  signal: AbortSignal,
 ): Promise<string> {
-  const commonHeaders: Record<string, string> = {};
-  if (githubUserHeader.trim()) {
-    commonHeaders["X-GitHub-User"] = githubUserHeader.trim();
+  const id = Date.now();
+
+  // 1. Initialize
+  const init = await rpc<unknown>(mcpUrl, {
+    jsonrpc: "2.0", id, method: "initialize",
+    params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "kbsearch-extension", version: "0.0.1" } },
+  }, {}, signal);
+
+  if (!init.response.ok || init.body.error) {
+    throw new Error(`MCP initialize failed: ${init.body.error?.message ?? init.response.statusText}`);
   }
 
-  const initId = Date.now();
-  const initPayload = {
-    jsonrpc: "2.0",
-    id: initId,
-    method: "initialize",
-    params: {
-      protocolVersion: "2024-11-05",
-      capabilities: {},
-      clientInfo: {
-        name: "kbsearch-extension",
-        version: "0.0.1"
-      }
-    }
-  };
+  const sessionId = init.response.headers.get("mcp-session-id") ?? "";
+  const sh: Record<string, string> = sessionId ? { "mcp-session-id": sessionId } : {};
 
-  let init = await callJsonRpc<{ protocolVersion?: string }>(
-    mcpUrl,
-    initPayload,
-    commonHeaders,
-    signal
-  );
+  // 2. Notify initialized
+  await fetch(mcpUrl, { method: "POST", headers: { ...MCP_HEADERS, ...sh }, body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }), signal });
 
-  // Some MCP gateways are strict about Accept formatting; retry once with explicit order.
-  if (init.response.status === 406) {
-    init = await callJsonRpc<{ protocolVersion?: string }>(
-      mcpUrl,
-      initPayload,
-      {
-        ...commonHeaders,
-        Accept: "text/event-stream, application/json"
-      },
-      signal
-    );
+  // 3. Call tool
+  const call = await rpc<unknown>(mcpUrl, {
+    jsonrpc: "2.0", id: id + 1, method: "tools/call",
+    params: { name: toolName, arguments: toolArgs },
+  }, sh, signal);
+
+  if (!call.response.ok || call.body.error) {
+    throw new Error(`MCP tools/call failed: ${call.body.error?.message ?? call.response.statusText}`);
   }
 
-  if (!init.response.ok) {
-    const detail = init.body.error?.message ?? "Unknown error";
-    throw new Error(`MCP initialize failed (${init.response.status}): ${detail}`);
-  }
-  if (init.body.error) {
-    throw new Error(`MCP initialize error: ${init.body.error.message}`);
-  }
-
-  const sessionId = getSessionHeaderValue(init.response);
-  const sessionHeaders = {
-    ...commonHeaders,
-    ...(sessionId ? { "mcp-session-id": sessionId } : {})
-  };
-
-  const initializedPayload = {
-    jsonrpc: "2.0",
-    method: "notifications/initialized",
-    params: {}
-  };
-
-  await fetch(mcpUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "application/json, text/event-stream",
-      "MCP-Protocol-Version": "2024-11-05",
-      ...sessionHeaders
-    },
-    body: JSON.stringify(initializedPayload),
-    signal
-  });
-
-  const callId = initId + 1;
-  const toolsListPayload = {
-    jsonrpc: "2.0",
-    id: callId,
-    method: "tools/list",
-    params: {}
-  };
-
-  const toolsList = await callJsonRpc<MpcToolsListResult>(
-    mcpUrl,
-    toolsListPayload,
-    sessionHeaders,
-    signal
-  );
-
-  const supportsIncludeSources = Boolean(
-    toolsList.body.result?.tools
-      ?.find((tool) => tool.name === toolName)
-      ?.inputSchema
-      ?.properties
-      ?.include_sources
-  );
-
-  const finalToolArgs = {
-    ...toolArgs,
-    ...(supportsIncludeSources ? { include_sources: includeSources } : {})
-  };
-
-  const callToolId = callId + 1;
-  const toolCallPayload = {
-    jsonrpc: "2.0",
-    id: callToolId,
-    method: "tools/call",
-    params: {
-      name: toolName,
-      arguments: finalToolArgs
-    }
-  };
-
-  const toolCall = await callJsonRpc<unknown>(
-    mcpUrl,
-    toolCallPayload,
-    sessionHeaders,
-    signal
-  );
-
-  if (!toolCall.response.ok) {
-    const detail = toolCall.body.error?.message ?? "Unknown error";
-    throw new Error(`MCP tools/call failed (${toolCall.response.status}): ${detail}`);
-  }
-  if (toolCall.body.error) {
-    throw new Error(`MCP tools/call error: ${toolCall.body.error.message}`);
-  }
-
-  return extractToolText(toolCall.body.result);
+  return extractText(call.body.result);
 }
 
-function formatToolOutput(text: string): string {
-  if (!text.trim()) {
-    return "No response returned from MCP tool.";
-  }
+// ---------------------------------------------------------------------------
+// Response classification & Copilot summarisation
+// ---------------------------------------------------------------------------
 
-  return text;
+const NO_RESULTS_PATTERNS = [
+  "No relevant information found",
+  "no chunks met min relevance",
+];
+
+const ERROR_PREFIX = "ERROR:";
+
+/** Returns true when the MCP tool response indicates no knowledge-base hits. */
+function hasNoResults(text: string): boolean {
+  if (text.startsWith(ERROR_PREFIX)) { return true; }
+  return NO_RESULTS_PATTERNS.some((p) => text.includes(p));
 }
 
-async function summarizeResponseWithCopilot(
+async function summarize(
   request: vscode.ChatRequest,
-  retrievedContext: string,
-  token: vscode.CancellationToken
+  context: string,
+  token: vscode.CancellationToken,
 ): Promise<string> {
   const messages = [
     vscode.LanguageModelChatMessage.User(
-      [
-        "You are summarizing retrieved documentation context for the user.",
-        "Provide a concise, direct answer in 3-6 sentences.",
-        "Use inline citations [n] when supported by the context.",
-        "If a SOURCES section and Query ID are present in the context, keep them in the final output.",
-        "Do not repeat full chunk contents."
-      ].join(" ")
+      "You are summarizing retrieved documentation context for the user. " +
+      "Provide a concise, direct answer based ONLY on the retrieved context below. " +
+      "Do NOT answer from your own general knowledge. " +
+      "Use inline citations [n] when supported by the context. " +
+      "Always preserve the SOURCES section and Query ID in the final output. " +
+      "Do not repeat full chunk contents.",
     ),
     vscode.LanguageModelChatMessage.User(
-      `User question: ${request.prompt}\n\nRetrieved context:\n${retrievedContext}`
-    )
+      `User question: ${request.prompt}\n\nRetrieved context:\n${context}`,
+    ),
   ];
 
-  const response = await request.model.sendRequest(messages, {}, token);
+  const resp = await request.model.sendRequest(messages, {}, token);
   let text = "";
-  for await (const fragment of response.text) {
-    text += fragment;
-  }
+  for await (const fragment of resp.text) { text += fragment; }
   return text.trim();
 }
 
-export function activate(context: vscode.ExtensionContext) {
-  void ensureFirstRunMcpSync(context);
+// ---------------------------------------------------------------------------
+// Extension activation
+// ---------------------------------------------------------------------------
 
-  const handler: vscode.ChatRequestHandler = async (
-    request,
-    _chatContext,
-    stream,
-    token
-  ) => {
-    const {
-      mcpUrl,
-      toolName,
-      githubUserHeader,
-      profile,
-      topK,
-      includeSources,
-      summarizeWithCopilot: useCopilotSummary
-    } = getConfig();
+export function activate(ctx: vscode.ExtensionContext) {
+  const handler: vscode.ChatRequestHandler = async (request, _chatCtx, stream, token) => {
+    const { mcpUrl, toolName, profile, topK } = getConfig();
     const controller = new AbortController();
-    const cancellationSubscription = token.onCancellationRequested(() => controller.abort());
+    const sub = token.onCancellationRequested(() => controller.abort());
 
     try {
-      const text = await callMcpTool(
-        mcpUrl,
-        toolName,
-        {
-          query: request.prompt,
-          profile,
-          top_k: topK
-        },
-        includeSources,
-        githubUserHeader,
-        controller.signal
+      const raw = await callMcpTool(
+        mcpUrl, toolName,
+        { query: request.prompt, profile, top_k: topK },
+        controller.signal,
       );
 
-      if (useCopilotSummary) {
-        try {
-          const summarized = await summarizeResponseWithCopilot(request, text, token);
-          stream.markdown(summarized || formatToolOutput(text));
-        } catch {
-          // Fall back to raw retrieved output when model summarization is unavailable.
-          stream.markdown(formatToolOutput(text));
-        }
+      if (hasNoResults(raw)) {
+        stream.markdown("This information is not available in the internal knowledge base.");
       } else {
-        stream.markdown(formatToolOutput(text));
+        try {
+          const summary = await summarize(request, raw, token);
+          stream.markdown(summary || raw);
+        } catch {
+          stream.markdown(raw);
+        }
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      stream.markdown(`@knowledge MCP call failed: ${message}`);
+    } catch (err) {
+      stream.markdown(`@knowledge MCP call failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      cancellationSubscription.dispose();
+      sub.dispose();
     }
 
-    return {
-      metadata: {
-        participant: "knowledge"
-      }
-    };
+    return { metadata: { participant: "knowledge" } };
   };
 
-  const participant = vscode.chat.createChatParticipant(
-    "kbsearch-extension.knowledge",
-    handler
-  );
-
-  participant.iconPath = vscode.Uri.joinPath(
-    context.extensionUri,
-    "media",
-    "knowledge.svg"
-  );
-
-  context.subscriptions.push(participant);
+  const participant = vscode.chat.createChatParticipant("kbsearch-extension.knowledge", handler);
+  participant.iconPath = vscode.Uri.joinPath(ctx.extensionUri, "media", "knowledge.svg");
+  ctx.subscriptions.push(participant);
 }
 
-export function deactivate() {
-  // No-op
-}
+export function deactivate() {}
