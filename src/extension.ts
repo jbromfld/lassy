@@ -159,7 +159,6 @@ async function summarize(
       "You are summarizing retrieved documentation context for the user. " +
       "Provide a concise, direct answer based ONLY on the retrieved context below. " +
       "Do NOT answer from your own general knowledge. " +
-      "Use inline citations [n] when supported by the context. " +
       "Always preserve the SOURCES section and Query ID in the final output. " +
       "Do not repeat full chunk contents.",
     ),
