@@ -22,32 +22,39 @@ Minimal VS Code extension that adds an `@knowledge` chat participant.
 
 ## Notes
 
-- This extension does not call Copilot language models.
-- `@knowledge` calls a configurable MCP endpoint and invokes an MCP tool.
+- `@knowledge` supports two backends:
+   - MCP mode: calls a configurable MCP endpoint and invokes an MCP tool.
+   - Direct mode: calls the RAG `/query` endpoint directly (`retrieve_only=true`), then formats chunks/sources similarly to the MCP tool output.
 
 ## Configuration
 
 Configure in VS Code settings:
 
+- `kbsearch.connectionMode` (default: `mcp`) - `mcp` or `direct`
 - `kbsearch.mcpUrl` (default: `http://localhost:8080/mcp`)
-- `kbsearch.mcpServerName` (default: `cicd-mcp`)
-- `kbsearch.syncMcpConfigOnInstall` (default: `true`)
 - `kbsearch.toolName` (default: `search_knowledge_base`)
-- `kbsearch.githubUserHeader` (default: empty)
+- `kbsearch.ragUrl` (default: `http://localhost:8000/query`) - used in `direct` mode
 - `kbsearch.profile` (default: `default`)
 - `kbsearch.topK` (default: `5`)
 - `kbsearch.includeSources` (default: `true`)
-- `kbsearch.summarizeWithCopilot` (default: `true`)
+- `kbsearch.minRelevance` (default: `0.01`) - used in `direct` mode
 
-## First-run behavior
+## Direct Mode Behavior
 
-On first activation (when `kbsearch.syncMcpConfigOnInstall` is enabled), the extension:
+In `direct` mode, the extension:
 
-- Reads user `mcp.json`
-- If `kbsearch.mcpUrl` is not explicitly set, uses the URL from `servers[kbsearch.mcpServerName]`
-- Creates `servers[kbsearch.mcpServerName]` in `mcp.json` if missing
+- Calls `kbsearch.ragUrl` with:
+   - `query`
+   - `top_k` from `kbsearch.topK`
+   - `profile` from `kbsearch.profile`
+   - `retrieve_only=true`
+- Filters returned chunks using `kbsearch.minRelevance`
+- Preserves `Query ID` and optional `SOURCES` in the generated context for summarization
 
-Deprecated settings:
+## MCP Mode Behavior
 
-- `kbsearch.ragUrl`
-- `kbsearch.minScore`
+In `mcp` mode, the extension keeps the existing JSON-RPC flow:
+
+- `initialize`
+- `notifications/initialized`
+- `tools/call` for `kbsearch.toolName`

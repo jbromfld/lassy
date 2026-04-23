@@ -16,14 +16,48 @@ const MCP_HEADERS = {
   "MCP-Protocol-Version": "2024-11-05",
 };
 
+type KbConfig = {
+  connectionMode: "mcp" | "direct";
+  mcpUrl: string;
+  toolName: string;
+  ragUrl: string;
+  profile: string;
+  topK: number;
+  minRelevance: number;
+  includeSources: boolean;
+};
+
+type RagChunk = {
+  citation?: string;
+  content: string;
+  title: string;
+  url?: string;
+  score?: number;
+};
+
+type RagQueryResponse = {
+  query_id?: string;
+  chunks?: RagChunk[];
+  metrics?: {
+    latency_ms?: number;
+    chunks_retrieved?: number;
+  };
+};
+
 function getConfig() {
   const cfg = vscode.workspace.getConfiguration("kbsearch");
+  const connectionMode = cfg.get<string>("connectionMode", "mcp");
+
   return {
+    connectionMode: connectionMode === "direct" ? "direct" : "mcp",
     mcpUrl: cfg.get<string>("mcpUrl", "http://localhost:8080/mcp"),
     toolName: cfg.get<string>("toolName", "search_knowledge_base"),
+    ragUrl: cfg.get<string>("ragUrl", "http://localhost:8000/query"),
     profile: cfg.get<string>("profile", "default"),
     topK: cfg.get<number>("topK", 5),
-  };
+    minRelevance: cfg.get<number>("minRelevance", 0.01),
+    includeSources: cfg.get<boolean>("includeSources", true),
+  } as KbConfig;
 }
 
 /** Send a JSON-RPC request and return the parsed response. */
@@ -132,6 +166,85 @@ async function callMcpTool(
   return extractText(call.body.result);
 }
 
+function formatRagRetrieveOnlyResponse(data: RagQueryResponse, config: KbConfig): string {
+  const rawChunks = Array.isArray(data.chunks) ? data.chunks : [];
+  const filteredChunks = rawChunks.filter((chunk) => (chunk.score ?? 0) >= config.minRelevance);
+
+  if (!rawChunks.length || !filteredChunks.length) {
+    return "No relevant information found in the knowledge base for this query.";
+  }
+
+  const chunksText = filteredChunks.map((chunk) => {
+    return `- ${chunk.title}\nContent:\n${chunk.content}`;
+  }).join("\n\n");
+
+  const seenSources = new Map<string, { title: string; url: string; score: number }>();
+  for (const chunk of filteredChunks) {
+    const title = chunk.title;
+    const url = chunk.url ?? "";
+    const score = chunk.score ?? 0;
+    const key = url || title;
+    const existing = seenSources.get(key);
+    if (!existing || score > existing.score) {
+      seenSources.set(key, { title, url, score });
+    }
+  }
+
+  const sourcesList = Array.from(seenSources.values()).map((src) => {
+    const urlPart = src.url ? ` - ${src.url}` : "";
+    return `- ${src.title}${urlPart} (relevance: ${src.score.toFixed(3)})`;
+  }).join("\n");
+
+  const queryId = data.query_id ?? "";
+  const latencyMs = data.metrics?.latency_ms ?? 0;
+
+  const responseParts: string[] = [
+    "# Retrieved Information",
+    "",
+    chunksText,
+    `Query ID: ${queryId} (use this for feedback)`,
+    `Retrieved ${filteredChunks.length} relevant chunks (from ${rawChunks.length} total) in ${Math.round(latencyMs)}ms`,
+  ];
+
+  if (config.includeSources) {
+    responseParts.push("", "---", "# SOURCES", sourcesList);
+  }
+
+  return responseParts.join("\n");
+}
+
+async function callRagDirect(
+  ragUrl: string,
+  query: string,
+  profile: string,
+  topK: number,
+  signal: AbortSignal,
+  config: KbConfig,
+): Promise<string> {
+  const response = await fetch(ragUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+    },
+    body: JSON.stringify({
+      query,
+      top_k: topK,
+      retrieve_only: true,
+      profile,
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`RAG query failed (${response.status}): ${errorBody || response.statusText}`);
+  }
+
+  const data = (await response.json()) as RagQueryResponse;
+  return formatRagRetrieveOnlyResponse(data, config);
+}
+
 // ---------------------------------------------------------------------------
 // Response classification & Copilot summarisation
 // ---------------------------------------------------------------------------
@@ -179,16 +292,26 @@ async function summarize(
 
 export function activate(ctx: vscode.ExtensionContext) {
   const handler: vscode.ChatRequestHandler = async (request, _chatCtx, stream, token) => {
-    const { mcpUrl, toolName, profile, topK } = getConfig();
+    const config = getConfig();
     const controller = new AbortController();
     const sub = token.onCancellationRequested(() => controller.abort());
 
     try {
-      const raw = await callMcpTool(
-        mcpUrl, toolName,
-        { query: request.prompt, profile, top_k: topK },
-        controller.signal,
-      );
+      const raw = config.connectionMode === "direct"
+        ? await callRagDirect(
+          config.ragUrl,
+          request.prompt,
+          config.profile,
+          config.topK,
+          controller.signal,
+          config,
+        )
+        : await callMcpTool(
+          config.mcpUrl,
+          config.toolName,
+          { query: request.prompt, profile: config.profile, top_k: config.topK },
+          controller.signal,
+        );
 
       if (hasNoResults(raw)) {
         stream.markdown("This information is not available in the internal knowledge base.");
@@ -201,7 +324,8 @@ export function activate(ctx: vscode.ExtensionContext) {
         }
       }
     } catch (err) {
-      stream.markdown(`@knowledge MCP call failed: ${err instanceof Error ? err.message : String(err)}`);
+      const mode = config.connectionMode === "direct" ? "RAG" : "MCP";
+      stream.markdown(`@knowledge ${mode} call failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       sub.dispose();
     }

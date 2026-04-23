@@ -26,12 +26,21 @@
         "name": "knowledge",
         "fullName": "Internal Knowledge",
         "description": "Ask questions using internal knowledge context.",
-        "isSticky": true
+        "isSticky": false
       }
     ],
     "configuration": {
       "title": "KB Search",
       "properties": {
+        "kbsearch.connectionMode": {
+          "type": "string",
+          "enum": [
+            "mcp",
+            "direct"
+          ],
+          "default": "mcp",
+          "description": "Connection strategy for @knowledge. Use 'mcp' for MCP tool calls or 'direct' to query the RAG service HTTP API directly."
+        },
         "kbsearch.mcpUrl": {
           "type": "string",
           "default": "http://localhost:8080/mcp",
@@ -42,16 +51,33 @@
           "default": "search_knowledge_base",
           "description": "MCP tool name invoked by @knowledge."
         },
+        "kbsearch.ragUrl": {
+          "type": "string",
+          "default": "http://localhost:8000/query",
+          "description": "Direct RAG query endpoint used when connectionMode is 'direct'."
+        },
         "kbsearch.profile": {
           "type": "string",
           "default": "default",
-          "description": "Profile argument passed to the MCP tool."
+          "description": "Profile argument passed to MCP tool calls or direct RAG requests."
         },
         "kbsearch.topK": {
           "type": "number",
           "default": 5,
           "minimum": 1,
           "description": "Number of relevant chunks to retrieve."
+        },
+        "kbsearch.minRelevance": {
+          "type": "number",
+          "default": 0.01,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Minimum chunk relevance score used to filter direct RAG results."
+        },
+        "kbsearch.includeSources": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include a SOURCES block in direct RAG responses before summarization."
         }
       }
     }
