@@ -21,9 +21,6 @@ type KbConfig = {
   mcpUrl: string;
   toolName: string;
   ragUrl: string;
-  profile: string;
-  topK: number;
-  minRelevance: number;
   includeSources: boolean;
 };
 
@@ -46,16 +43,13 @@ type RagQueryResponse = {
 
 function getConfig() {
   const cfg = vscode.workspace.getConfiguration("kbsearch");
-  const connectionMode = cfg.get<string>("connectionMode", "mcp");
+  const connectionMode = cfg.get<string>("connectionMode", "direct");
 
   return {
     connectionMode: connectionMode === "direct" ? "direct" : "mcp",
     mcpUrl: cfg.get<string>("mcpUrl", "http://localhost:8080/mcp"),
     toolName: cfg.get<string>("toolName", "search_knowledge_base"),
     ragUrl: cfg.get<string>("ragUrl", "http://localhost:8000/query"),
-    profile: cfg.get<string>("profile", "default"),
-    topK: cfg.get<number>("topK", 5),
-    minRelevance: cfg.get<number>("minRelevance", 0.01),
     includeSources: cfg.get<boolean>("includeSources", true),
   } as KbConfig;
 }
@@ -167,19 +161,18 @@ async function callMcpTool(
 }
 
 function formatRagRetrieveOnlyResponse(data: RagQueryResponse, config: KbConfig): string {
-  const rawChunks = Array.isArray(data.chunks) ? data.chunks : [];
-  const filteredChunks = rawChunks.filter((chunk) => (chunk.score ?? 0) >= config.minRelevance);
+  const chunks = Array.isArray(data.chunks) ? data.chunks : [];
 
-  if (!rawChunks.length || !filteredChunks.length) {
+  if (!chunks.length) {
     return "No relevant information found in the knowledge base for this query.";
   }
 
-  const chunksText = filteredChunks.map((chunk) => {
+  const chunksText = chunks.map((chunk) => {
     return `- ${chunk.title}\nContent:\n${chunk.content}`;
   }).join("\n\n");
 
   const seenSources = new Map<string, { title: string; url: string; score: number }>();
-  for (const chunk of filteredChunks) {
+  for (const chunk of chunks) {
     const title = chunk.title;
     const url = chunk.url ?? "";
     const score = chunk.score ?? 0;
@@ -203,7 +196,7 @@ function formatRagRetrieveOnlyResponse(data: RagQueryResponse, config: KbConfig)
     "",
     chunksText,
     `Query ID: ${queryId} (use this for feedback)`,
-    `Retrieved ${filteredChunks.length} relevant chunks (from ${rawChunks.length} total) in ${Math.round(latencyMs)}ms`,
+    `Retrieved ${chunks.length} chunks in ${Math.round(latencyMs)}ms`,
   ];
 
   if (config.includeSources) {
@@ -216,8 +209,6 @@ function formatRagRetrieveOnlyResponse(data: RagQueryResponse, config: KbConfig)
 async function callRagDirect(
   ragUrl: string,
   query: string,
-  profile: string,
-  topK: number,
   signal: AbortSignal,
   config: KbConfig,
 ): Promise<string> {
@@ -229,9 +220,7 @@ async function callRagDirect(
     },
     body: JSON.stringify({
       query,
-      top_k: topK,
       retrieve_only: true,
-      profile,
     }),
     signal,
   });
@@ -301,15 +290,13 @@ export function activate(ctx: vscode.ExtensionContext) {
         ? await callRagDirect(
           config.ragUrl,
           request.prompt,
-          config.profile,
-          config.topK,
           controller.signal,
           config,
         )
         : await callMcpTool(
           config.mcpUrl,
           config.toolName,
-          { query: request.prompt, profile: config.profile, top_k: config.topK },
+          { query: request.prompt },
           controller.signal,
         );
 

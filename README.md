@@ -30,14 +30,11 @@ Minimal VS Code extension that adds an `@knowledge` chat participant.
 
 Configure in VS Code settings:
 
-- `kbsearch.connectionMode` (default: `mcp`) - `mcp` or `direct`
+- `kbsearch.connectionMode` (default: `direct`) - `mcp` or `direct`
 - `kbsearch.mcpUrl` (default: `http://localhost:8080/mcp`)
 - `kbsearch.toolName` (default: `search_knowledge_base`)
 - `kbsearch.ragUrl` (default: `http://localhost:8000/query`) - used in `direct` mode
-- `kbsearch.profile` (default: `default`)
-- `kbsearch.topK` (default: `5`)
 - `kbsearch.includeSources` (default: `true`)
-- `kbsearch.minRelevance` (default: `0.01`) - used in `direct` mode
 
 ## Direct Mode Behavior
 
@@ -45,10 +42,7 @@ In `direct` mode, the extension:
 
 - Calls `kbsearch.ragUrl` with:
    - `query`
-   - `top_k` from `kbsearch.topK`
-   - `profile` from `kbsearch.profile`
    - `retrieve_only=true`
-- Filters returned chunks using `kbsearch.minRelevance`
 - Preserves `Query ID` and optional `SOURCES` in the generated context for summarization
 
 ## MCP Mode Behavior
