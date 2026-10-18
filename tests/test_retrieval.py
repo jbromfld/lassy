@@ -80,6 +80,30 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         for body in ({'query': ''}, {'query': '  '}, {'top_k': 0}, {'top_k': -1}):
             self.assertEqual((await self.query([], **body)).status_code, 422)
 
+    async def test_document_api_and_provenance(self):
+        store = self.factory.create_vector_store.return_value
+        store.get_document_status = AsyncMock(return_value=None)
+        store.replace_document = AsyncMock(return_value=True)
+        store.delete_document = AsyncMock()
+        embed = MagicMock()
+        self.factory.get_embedding_provider.return_value = embed
+        embed.get_model_name.return_value = 'test'
+        embed.get_dimension.return_value = 768
+        embed.embed_batch = AsyncMock(return_value=[[1.] + [0.] * 767])
+        response = await self.client.put('/documents/rss/123', json={'content':'Short summary.', 'title':'VLM'})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['chunks_created'], 1)
+        self.assertEqual(store.replace_document.call_args.args[:2], ('rss', '123'))
+        response = await self.client.delete('/documents/rss/123')
+        self.assertEqual(response.status_code, 200)
+        store.delete_document.assert_awaited_once_with('rss', '123')
+        response = await self.client.put('/documents/rss/123', json={'content':'  '})
+        self.assertEqual(response.status_code, 422)
+        data = (await self.query([SimpleNamespace(chunk_id='id',content='Evidence',boosted_score=.1,
+            rerank_score=None,metadata={'collection':'corpus','document_id':'1','section_ref':'page 2'})])).json()
+        self.assertEqual(data['chunks'][0]['section'], 'page 2')
+        self.assertEqual(data['chunks'][0]['document_id'], '1')
+
     async def test_generation_is_rejected(self):
         response = await self.client.post('/query', json={'query': 'test', 'retrieve_only': False})
         self.assertEqual(response.status_code, 422)
@@ -138,13 +162,13 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             conn.fetchval = AsyncMock(side_effect=[1, None])
             with self.assertRaisesRegex(RuntimeError, 'Missing table'):
                 await main.check_readiness()
-            conn.fetchval = AsyncMock(side_effect=[1, *([True]*4), False, 'vector(384)'])
+            conn.fetchval = AsyncMock(side_effect=[1, *([True]*5), False, 'vector(384)'])
             with self.assertRaisesRegex(RuntimeError, 'dimension'):
                 await main.check_readiness()
-            conn.fetchval = AsyncMock(side_effect=[1, *([True]*4), True])
+            conn.fetchval = AsyncMock(side_effect=[1, *([True]*5), True])
             with self.assertRaisesRegex(RuntimeError, 'Outdated schema'):
                 await main.check_readiness()
-            conn.fetchval = AsyncMock(side_effect=[1, *([True]*4), False, 'vector(768)'])
+            conn.fetchval = AsyncMock(side_effect=[1, *([True]*5), False, 'vector(768)'])
             await main.check_readiness()
 
     async def test_model_dimension_mismatch_and_embedding_worker(self):

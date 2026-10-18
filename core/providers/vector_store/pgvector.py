@@ -337,6 +337,47 @@ class PgVectorStore(VectorStore):
 
             return results
 
+    async def get_document_status(self, collection, document_id):
+        async with self.db_pool.acquire() as conn:
+            row = await conn.fetchrow("""SELECT revision,
+                (SELECT count(*) FROM embeddings WHERE metadata->>'collection'=$1
+                 AND metadata->>'document_id'=$2) AS chunks
+                FROM documents WHERE collection=$1 AND document_id=$2""", collection, document_id)
+            return dict(row) if row else None
+
+    async def replace_document(self, collection, document_id, revision, chunks):
+        """Publish all chunks in one transaction, serialized with deletes/upserts."""
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                                   json.dumps([collection, document_id]))
+                current = await conn.fetchval(
+                    "SELECT revision FROM documents WHERE collection=$1 AND document_id=$2",
+                    collection, document_id)
+                if current == revision:
+                    return False
+                await conn.execute("DELETE FROM embeddings WHERE metadata->>'collection'=$1 AND metadata->>'document_id'=$2",
+                                   collection, document_id)
+                await conn.executemany("""INSERT INTO embeddings
+                    (id, content, content_hash, content_vector, metadata)
+                    VALUES ($1,$2,$3,$4::vector,$5::jsonb)""", [
+                    (c.id, c.content, c.content_hash, "[" + ",".join(map(str, c.vector)) + "]",
+                     json.dumps(c.metadata)) for c in chunks])
+                await conn.execute("""INSERT INTO documents(collection,document_id,revision)
+                    VALUES ($1,$2,$3) ON CONFLICT(collection,document_id) DO UPDATE
+                    SET revision=EXCLUDED.revision,indexed_at=NOW()""", collection, document_id, revision)
+        return True
+
+    async def delete_document(self, collection, document_id):
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                                   json.dumps([collection, document_id]))
+                await conn.execute("DELETE FROM embeddings WHERE metadata->>'collection'=$1 AND metadata->>'document_id'=$2",
+                                   collection, document_id)
+                await conn.execute("DELETE FROM documents WHERE collection=$1 AND document_id=$2",
+                                   collection, document_id)
+
     async def get_chunk(self, chunk_id: UUID) -> Optional[Chunk]:
         """Get chunk by ID.
 

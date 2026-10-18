@@ -1,9 +1,9 @@
 {
 	"servers": {
 		"local-kbsearch-server": {
-			"command": "/Users/jbromfield/workspace/kbsearch-mcp-server/.venv/bin/python",
+			"command": "/Users/jbromfield/workspace/local-mcp-server/.venv/bin/python",
 			"args": [
-				"/Users/jbromfield/workspace/kbsearch-mcp-server/server.py"
+				"/Users/jbromfield/workspace/local-mcp-server/server.py"
 			],
 			"description": "A set of tools that you can use to search the KB",
 			"type": "stdio"

@@ -213,6 +213,22 @@ class VectorStore(ABC):
         pass
 
     @abstractmethod
+    async def get_document_status(self, collection: str, document_id: str) -> Optional[Dict[str, Any]]:
+        """Return the indexed revision and chunk count, or None."""
+        pass
+
+    @abstractmethod
+    async def replace_document(self, collection: str, document_id: str, revision: str,
+                               chunks: List[Chunk]) -> bool:
+        """Atomically replace a document's chunks; return whether it changed."""
+        pass
+
+    @abstractmethod
+    async def delete_document(self, collection: str, document_id: str) -> None:
+        """Idempotently remove a document and its chunks."""
+        pass
+
+    @abstractmethod
     async def get_chunk(self, chunk_id: UUID) -> Optional[Chunk]:
         """Get chunk by ID.
 
