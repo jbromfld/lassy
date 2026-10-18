@@ -1,8 +1,9 @@
 """Retrieval system with metadata boosting."""
 
 import math
+import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from config.models import RetrievalConfig
@@ -24,6 +25,7 @@ class RetrievalResult:
     recency_boost: float = 1.0
     quality_boost: float = 1.0
     popularity_boost: float = 1.0
+    rerank_score: Optional[float] = None
 
 
 class Retriever:
@@ -38,6 +40,7 @@ class Retriever:
         vector_store: VectorStore,
         embedding_provider: EmbeddingProvider,
         config: RetrievalConfig,
+        reranker=None,
     ):
         """Initialize retriever.
 
@@ -49,6 +52,8 @@ class Retriever:
         self.vector_store = vector_store
         self.embedding_provider = embedding_provider
         self.config = config
+        self.reranker = reranker
+        self.rerank_time_ms = 0.0
 
     async def retrieve(
         self,
@@ -68,6 +73,8 @@ class Retriever:
         """
         top_k = top_k or self.config.top_k
 
+        candidate_k = max(top_k, self.config.rerank_top_k) if self.config.enable_reranking else top_k
+
         # Generate query embedding
         query_vector = await self.embedding_provider.embed_text(query)
 
@@ -77,7 +84,7 @@ class Retriever:
             search_results = await self.vector_store.hybrid_search(
                 query_text=query,
                 query_vector=query_vector,
-                top_k=top_k * 2,  # Get more results for boosting
+                top_k=candidate_k * 2,  # Get more results for boosting
                 vector_weight=self.config.vector_weight,
                 keyword_weight=self.config.bm25_weight,
                 filter_dict=filters,
@@ -86,7 +93,7 @@ class Retriever:
             # Pure vector search
             search_results = await self.vector_store.vector_search(
                 query_vector=query_vector,
-                top_k=top_k * 2,
+                top_k=candidate_k * 2,
                 filter_dict=filters,
             )
 
@@ -108,6 +115,22 @@ class Retriever:
 
         # Re-rank by boosted score
         boosted_results.sort(key=lambda x: x.boosted_score, reverse=True)
+
+        if self.config.enable_reranking:
+            rerank_start = time.perf_counter()
+            if self.reranker is None:
+                raise RuntimeError("Reranking enabled without a configured reranker")
+            candidates = boosted_results[:candidate_k]
+            scores = await self.reranker.score(query, [r.content for r in candidates])
+            if len(scores) != len(candidates):
+                raise RuntimeError("Reranker returned an incorrect number of scores")
+            for result, score in zip(candidates, scores):
+                if not math.isfinite(score):
+                    raise ValueError("Reranker returned a nonfinite score")
+                result.rerank_score = score
+            candidates.sort(key=lambda r: r.rerank_score, reverse=True)
+            boosted_results = candidates
+            self.rerank_time_ms = (time.perf_counter() - rerank_start) * 1000
 
         # Take top K
         boosted_results = boosted_results[:top_k]
@@ -134,7 +157,7 @@ class Retriever:
         Returns:
             List of RetrievalResult with boosted scores
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         results = []
 
         for search_result in search_results:
@@ -199,6 +222,9 @@ class Retriever:
                 )
             else:
                 last_modified = last_modified_str
+
+            if last_modified.tzinfo is None:
+                last_modified = last_modified.replace(tzinfo=timezone.utc)
 
             # Calculate age in days
             age_days = (now - last_modified).days

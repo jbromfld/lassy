@@ -11,7 +11,7 @@ DROP TABLE IF EXISTS configuration_changes CASCADE;
 DROP TABLE IF EXISTS configuration_profiles CASCADE;
 
 -- Drop views
-DROP VIEW IF EXISTS metrics_by_config CASCADE;
+DROP MATERIALIZED VIEW IF EXISTS metrics_by_config CASCADE;
 
 -- Drop functions
 DROP FUNCTION IF EXISTS calculate_hybrid_score CASCADE;
@@ -20,3 +20,6 @@ DROP FUNCTION IF EXISTS update_embedding_quality CASCADE;
 
 -- Note: Extensions are kept (uuid-ossp, vector, pg_trgm)
 
+
+DROP FUNCTION IF EXISTS update_updated_at_column() CASCADE;
+DROP FUNCTION IF EXISTS refresh_metrics_by_config() CASCADE;

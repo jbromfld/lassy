@@ -32,20 +32,6 @@ class SearchResult:
     rank: int
 
 
-@dataclass
-class LLMResponse:
-    """LLM response with metadata."""
-
-    content: str
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
-    model: str
-    finish_reason: str
-    latency_ms: float
-    cost_usd: float = 0.0
-
-
 # ============================================
 # Embedding Provider
 # ============================================
@@ -96,18 +82,6 @@ class EmbeddingProvider(ABC):
         """
         pass
 
-    @abstractmethod
-    def get_cost(self, num_tokens: int) -> float:
-        """Calculate cost for embedding generation.
-
-        Args:
-            num_tokens: Number of tokens processed
-
-        Returns:
-            Cost in USD
-        """
-        pass
-
     async def __aenter__(self):
         """Async context manager entry."""
         return self
@@ -115,108 +89,6 @@ class EmbeddingProvider(ABC):
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
         pass
-
-
-# ============================================
-# LLM Provider
-# ============================================
-
-
-class LLMProvider(ABC):
-    """Abstract base class for LLM providers."""
-
-    @abstractmethod
-    async def generate(
-        self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        **kwargs,
-    ) -> LLMResponse:
-        """Generate response from LLM.
-
-        Args:
-            prompt: User prompt
-            system_prompt: Optional system prompt
-            temperature: Optional temperature override
-            max_tokens: Optional max tokens override
-            **kwargs: Additional provider-specific parameters
-
-        Returns:
-            LLMResponse with generated text and metadata
-        """
-        pass
-
-    @abstractmethod
-    async def generate_stream(
-        self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        **kwargs,
-    ):
-        """Generate streaming response from LLM.
-
-        Args:
-            prompt: User prompt
-            system_prompt: Optional system prompt
-            temperature: Optional temperature override
-            max_tokens: Optional max tokens override
-            **kwargs: Additional provider-specific parameters
-
-        Yields:
-            Chunks of generated text
-        """
-        pass
-
-    @abstractmethod
-    def get_model_name(self) -> str:
-        """Get model name.
-
-        Returns:
-            Model name string
-        """
-        pass
-
-    @abstractmethod
-    def count_tokens(self, text: str) -> int:
-        """Count tokens in text.
-
-        Args:
-            text: Text to count tokens for
-
-        Returns:
-            Number of tokens
-        """
-        pass
-
-    @abstractmethod
-    def get_cost(self, prompt_tokens: int, completion_tokens: int) -> float:
-        """Calculate cost for LLM generation.
-
-        Args:
-            prompt_tokens: Number of prompt tokens
-            completion_tokens: Number of completion tokens
-
-        Returns:
-            Cost in USD
-        """
-        pass
-
-    async def __aenter__(self):
-        """Async context manager entry."""
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
-        pass
-
-
-# ============================================
-# Vector Store
-# ============================================
 
 
 class VectorStore(ABC):

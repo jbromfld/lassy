@@ -1,0 +1,256 @@
+{
+  "info": {
+    "name": "lassy-retrieval-service",
+    "description": "Standalone HTTP ingestion, retrieval, optional local reranking, feedback and metrics. Configure the service through .env; clients generate answers. Set base_url, run Ingest Content, then Query. Query saves query_id for Submit Feedback only when tracking succeeds. Ingest URL is an optional external-source example; change ingest_url as needed. The API still requires the feedback table; initialize the current schema before using this collection.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "ingest_url",
+      "value": "https://docs.python.org/3/tutorial/",
+      "type": "string"
+    },
+    {
+      "key": "query_id",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health & Info",
+      "item": [
+        {
+          "name": "Root",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                ""
+              ]
+            },
+            "description": "Root endpoint \u2014 returns service name, version, and status."
+          }
+        },
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Checks database access, required schema and configured embedding dimensions. Returns 200 when ready or 503 when unavailable/incompatible."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Ingestion",
+      "item": [
+        {
+          "name": "Ingest URL",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"{{ingest_url}}\",\n  \"depth\": 1,\n  \"max_pages\": 50\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ingest",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ingest"
+              ]
+            },
+            "description": "Optional: ingest the URL in ingest_url. Requires network access from the service. Change the variable to your documentation URL."
+          }
+        },
+        {
+          "name": "Ingest Content",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"The standalone retrieval service stores documentation in PostgreSQL using the pgvector extension. During ingestion, documents are divided into overlapping chunks and encoded with a local embedding model. When a client submits a question, the service combines vector similarity with keyword search to find relevant chunks. An optional local cross-encoder can rerank those candidates before they are returned. Each returned chunk includes its content, title, citation label, chunk identifier, and available source URL. The service does not generate answers. Clients such as a local language model or the VS Code knowledge extension use the retrieved context to compose an answer. Configuration is loaded from environment variables and the .env file.\",\n  \"title\": \"Standalone retrieval overview\",\n  \"metadata\": {\n    \"author\": \"team\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/ingest",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ingest"
+              ]
+            },
+            "description": "Start here for a local smoke check. This sample exceeds the default 50-word minimum chunk size and needs no source URL. The service still needs its local embedding model and initialized database."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Query",
+      "item": [
+        {
+          "name": "Query",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"How does the standalone retrieval service find relevant documentation?\",\n  \"top_k\": 5\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/query",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "query"
+              ]
+            },
+            "description": "Returns ranked chunks, citation labels, retrieval/reranking scores, query_id, feedback_available and metrics. Generation belongs to the client. top_k overrides the environment default; optional filters match metadata. Retrieval is the default; legacy retrieve_only:true remains accepted, while false returns 422. The response script saves query_id only when feedback_available is true."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.unset(\"query_id\");",
+                  "if (pm.response.code === 200) {",
+                  "  const data = pm.response.json();",
+                  "  if (data.feedback_available === true && typeof data.query_id === \"string\") {",
+                  "    pm.collectionVariables.set(\"query_id\", data.query_id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Feedback",
+      "item": [
+        {
+          "name": "Submit Feedback",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query_id\": \"{{query_id}}\",\n  \"score\": 8,\n  \"comment\": \"The retrieved chunks were relevant and useful.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/feedback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "feedback"
+              ]
+            },
+            "description": "Submit a 0-10 rating for retrieved context. Run Query first to populate query_id. Feedback requires successful query tracking and the feedback table; 7+ counts as satisfied."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get(\"query_id\")) {",
+                  "  throw new Error(\"Run Query successfully first; feedback requires feedback_available=true.\");",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Metrics",
+      "item": [
+        {
+          "name": "Get Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/metrics",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "metrics"
+              ]
+            },
+            "description": "Aggregate query counts, average/median/p95 retrieval latency, average reranking latency, feedback counts and satisfaction. Empty aggregates may be null. No profile selection or generation cost metrics."
+          }
+        }
+      ]
+    }
+  ]
+}
