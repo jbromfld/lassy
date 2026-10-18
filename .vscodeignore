@@ -1,0 +1,15 @@
+src/**
+tests/**
+build/**
+node_modules/**
+.vscode/**
+.env
+.env.*
+.DS_Store
+.gitignore
+.vscodeignore
+build.sh
+package-lock.json
+tsconfig.json
+dist/**/*.map
+*.vsix

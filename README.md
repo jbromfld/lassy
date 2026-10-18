@@ -2,6 +2,37 @@
 
 Minimal VS Code extension that adds an `@knowledge` chat participant.
 
+## Build a VSIX for testing
+
+Run from this repository:
+
+```bash
+npm run build
+```
+
+Or run `./build.sh` directly, from any directory. The script installs dependencies
+if the local compiler or packager is missing, runs the tests, and packages
+`build/kbsearch-extension-<version>.vsix`. It then uninstalls the existing extension
+if installed and installs the new VSIX. After dependency changes, run `npm ci`
+before rebuilding. Node.js, npm, and the VS Code `code` command must be installed.
+
+Reload the VS Code window after installing or replacing the extension.
+
+Start the retrieval service separately and ingest some content. Configure VS Code
+to connect directly (these are already the defaults):
+
+```json
+{
+  "kbsearch.connectionMode": "direct",
+  "kbsearch.ragUrl": "http://localhost:8000/query"
+}
+```
+
+Then open Chat and ask `@knowledge` about the ingested content. A VS Code chat
+model must be available to generate answers; if generation fails, the extension
+shows the retrieved context. For a remote Extension Host, set `kbsearch.ragUrl`
+to an address reachable from that host. Start the retrieval service separately.
+
 ## Run locally
 
 1. Install dependencies:
@@ -43,7 +74,14 @@ In `direct` mode, the extension:
 - Calls `kbsearch.ragUrl` with:
    - `query`
    - `retrieve_only=true`
-- Preserves `Query ID` and optional `SOURCES` in the generated context for summarization
+- Validates the retrieval response; malformed payloads produce an error
+- Supplies citation labels with each chunk to VS Code’s selected model
+- Appends `Query ID`, feedback availability, and optional `SOURCES` independently of model output
+- Falls back to retrieved context if generation fails; cancellation suppresses output
+- Does not launch the service; run the RAG API separately with initialized external PostgreSQL/pgvector and the local embedding model
+- Requires no server-side Copilot key; VS Code provides answer generation
+
+Use `npm test` to compile and run direct-mode regression tests. For an end-to-end check, start the API, ingest a document, launch F5, and ask `@knowledge` about that document. Check that source labels match the answer, disable `kbsearch.includeSources` to hide the source list, and verify cancellation. When using a remote Extension Host, `localhost` refers to that host.
 
 ## MCP Mode Behavior
 

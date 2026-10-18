@@ -65,10 +65,12 @@
     }
   },
   "scripts": {
+    "build": "bash ./build.sh",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
-    "package": "vsce package --allow-missing-repository"
+    "package": "vsce package --allow-missing-repository",
+    "test": "npm run compile && node --test tests/*.test.js"
   },
   "devDependencies": {
     "@vscode/vsce": "2.24.0",

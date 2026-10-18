@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { callRagDirect, renderRetrieval } from "./rag";
 
 // ---------------------------------------------------------------------------
 // MCP JSON-RPC helpers
@@ -22,23 +23,6 @@ type KbConfig = {
   toolName: string;
   ragUrl: string;
   includeSources: boolean;
-};
-
-type RagChunk = {
-  citation?: string;
-  content: string;
-  title: string;
-  url?: string;
-  score?: number;
-};
-
-type RagQueryResponse = {
-  query_id?: string;
-  chunks?: RagChunk[];
-  metrics?: {
-    latency_ms?: number;
-    chunks_retrieved?: number;
-  };
 };
 
 function getConfig() {
@@ -160,80 +144,6 @@ async function callMcpTool(
   return extractText(call.body.result);
 }
 
-function formatRagRetrieveOnlyResponse(data: RagQueryResponse, config: KbConfig): string {
-  const chunks = Array.isArray(data.chunks) ? data.chunks : [];
-
-  if (!chunks.length) {
-    return "No relevant information found in the knowledge base for this query.";
-  }
-
-  const chunksText = chunks.map((chunk) => {
-    return `- ${chunk.title}\nContent:\n${chunk.content}`;
-  }).join("\n\n");
-
-  const seenSources = new Map<string, { title: string; url: string; score: number }>();
-  for (const chunk of chunks) {
-    const title = chunk.title;
-    const url = chunk.url ?? "";
-    const score = chunk.score ?? 0;
-    const key = url || title;
-    const existing = seenSources.get(key);
-    if (!existing || score > existing.score) {
-      seenSources.set(key, { title, url, score });
-    }
-  }
-
-  const sourcesList = Array.from(seenSources.values()).map((src) => {
-    const urlPart = src.url ? ` - ${src.url}` : "";
-    return `- ${src.title}${urlPart} (relevance: ${src.score.toFixed(3)})`;
-  }).join("\n");
-
-  const queryId = data.query_id ?? "";
-  const latencyMs = data.metrics?.latency_ms ?? 0;
-
-  const responseParts: string[] = [
-    "# Retrieved Information",
-    "",
-    chunksText,
-    `Query ID: ${queryId} (use this for feedback)`,
-    `Retrieved ${chunks.length} chunks in ${Math.round(latencyMs)}ms`,
-  ];
-
-  if (config.includeSources) {
-    responseParts.push("", "---", "# SOURCES", sourcesList);
-  }
-
-  return responseParts.join("\n");
-}
-
-async function callRagDirect(
-  ragUrl: string,
-  query: string,
-  signal: AbortSignal,
-  config: KbConfig,
-): Promise<string> {
-  const response = await fetch(ragUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "application/json",
-    },
-    body: JSON.stringify({
-      query,
-      retrieve_only: true,
-    }),
-    signal,
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(`RAG query failed (${response.status}): ${errorBody || response.statusText}`);
-  }
-
-  const data = (await response.json()) as RagQueryResponse;
-  return formatRagRetrieveOnlyResponse(data, config);
-}
-
 // ---------------------------------------------------------------------------
 // Response classification & Copilot summarisation
 // ---------------------------------------------------------------------------
@@ -255,13 +165,14 @@ async function summarize(
   request: vscode.ChatRequest,
   context: string,
   token: vscode.CancellationToken,
+  direct = false,
 ): Promise<string> {
   const messages = [
     vscode.LanguageModelChatMessage.User(
       "You are summarizing retrieved documentation context for the user. " +
       "Provide a concise, direct answer based ONLY on the retrieved context below. " +
       "Do NOT answer from your own general knowledge. " +
-      "Always preserve the SOURCES section and Query ID in the final output. " +
+      (direct ? "Preserve inline [N] citations. Return only the answer; sources and query details are added separately. " : "Always preserve the SOURCES section and Query ID in the final output. ") +
       "Do not repeat full chunk contents.",
     ),
     vscode.LanguageModelChatMessage.User(
@@ -286,19 +197,20 @@ export function activate(ctx: vscode.ExtensionContext) {
     const sub = token.onCancellationRequested(() => controller.abort());
 
     try {
-      const raw = config.connectionMode === "direct"
-        ? await callRagDirect(
-          config.ragUrl,
-          request.prompt,
-          controller.signal,
-          config,
-        )
-        : await callMcpTool(
-          config.mcpUrl,
-          config.toolName,
-          { query: request.prompt },
-          controller.signal,
+      if (token.isCancellationRequested) { controller.abort(); return; }
+      if (config.connectionMode === "direct") {
+        const data = await callRagDirect(config.ragUrl, request.prompt, controller.signal);
+        const output = await renderRetrieval(
+          data, config.includeSources,
+          (context) => summarize(request, context, token, true),
+          () => token.isCancellationRequested,
         );
+        if (output) { stream.markdown(output); }
+        return { metadata: { participant: "knowledge" } };
+      }
+      const raw = await callMcpTool(
+        config.mcpUrl, config.toolName, { query: request.prompt }, controller.signal,
+      );
 
       if (hasNoResults(raw)) {
         stream.markdown("This information is not available in the internal knowledge base.");
@@ -311,6 +223,7 @@ export function activate(ctx: vscode.ExtensionContext) {
         }
       }
     } catch (err) {
+      if (token.isCancellationRequested) { return; }
       const mode = config.connectionMode === "direct" ? "RAG" : "MCP";
       stream.markdown(`@knowledge ${mode} call failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
