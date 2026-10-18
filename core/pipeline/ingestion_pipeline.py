@@ -1,6 +1,7 @@
 """Document ingestion pipeline orchestration."""
 
 import time
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -8,8 +9,9 @@ from uuid import UUID, uuid4
 
 from config.models import ChunkingConfig
 from core.ingestion.chunker import DocumentChunker
+from core.pipeline.documents import DocumentRequest, upsert_document
 from core.ingestion.scraper import DocumentScraper
-from core.providers.base import Chunk, EmbeddingProvider, VectorStore
+from core.providers.base import EmbeddingProvider, VectorStore
 
 
 @dataclass
@@ -127,63 +129,26 @@ class IngestionPipeline:
                     error_message="No documents scraped",
                 )
 
-            # Step 2: Delete existing chunks for these URLs (to prevent duplicates)
+            # All ingestion entry points use the document pipeline and atomic publication.
+            chunks_created = embeddings_generated = 0
             for doc in documents:
-                if doc.url and doc.url != "direct-content":
-                    # Replace existing content from this source URL
-                    await self.vector_store.delete_by_filter({
-                        "source_url": doc.url
-                    })
-
-            # Step 3: Process all documents
-            all_chunks = []
-            for doc in documents:
-                # Chunk document
-                chunk_results = self.chunker.chunk_document(
-                    doc.content, doc.metadata)
-
-                if chunk_results:
-                    all_chunks.extend(chunk_results)
-
-            if not all_chunks:
-                return IngestionResult(
-                    job_id=job_id,
-                    success=False,
-                    pages_scraped=len(documents),
-                    chunks_created=0,
-                    embeddings_generated=0,
-                    processing_time_ms=(time.time() - start_time) * 1000,
-                    error_message="No chunks created (content may be too short)",
-                )
-
-            # Step 4: Generate embeddings
-            texts = [chunk.content for chunk in all_chunks]
-            embeddings = await self.embedding_provider.embed_batch(texts)
-
-            # Step 5: Create Chunk objects for vector store
-            chunks = []
-            for chunk_result, embedding in zip(all_chunks, embeddings):
-                chunk = Chunk(
-                    id=chunk_result.id,
-                    content=chunk_result.content,
-                    content_hash=chunk_result.content_hash,
-                    vector=embedding,
-                    metadata=chunk_result.metadata,
-                )
-                chunks.append(chunk)
-
-            # Step 6: Insert into vector store
-            await self.vector_store.insert_chunks(chunks)
-
-            processing_time = (time.time() - start_time) * 1000
+                identity = doc.url if doc.url != "direct-content" else doc.content
+                document_id = hashlib.sha256(identity.encode()).hexdigest()
+                document = DocumentRequest(content=doc.content,
+                    title=doc.title, url=doc.url if doc.url != "direct-content" else None,
+                    metadata=doc.metadata or {})
+                result = await upsert_document(self.vector_store, self.embedding_provider,
+                    self.chunker.config, "web" if request.url else "direct", document_id, document)
+                chunks_created += result["chunks_created"]
+                embeddings_generated += result["embeddings_generated"]
 
             return IngestionResult(
                 job_id=job_id,
                 success=True,
                 pages_scraped=len(documents),
-                chunks_created=len(all_chunks),
-                embeddings_generated=len(embeddings),
-                processing_time_ms=processing_time,
+                chunks_created=chunks_created,
+                embeddings_generated=embeddings_generated,
+                processing_time_ms=(time.time() - start_time) * 1000,
             )
 
         except Exception as e:

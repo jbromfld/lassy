@@ -23,3 +23,5 @@ DROP FUNCTION IF EXISTS update_embedding_quality CASCADE;
 
 DROP FUNCTION IF EXISTS update_updated_at_column() CASCADE;
 DROP FUNCTION IF EXISTS refresh_metrics_by_config() CASCADE;
+
+DROP TABLE IF EXISTS documents;

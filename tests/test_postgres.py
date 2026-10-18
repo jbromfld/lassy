@@ -96,6 +96,42 @@ class PostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary['avg_feedback_score'], 9)
         self.assertEqual(await self.store.delete_by_filter({"author'": "O'Reilly"}), 1)
 
+    async def test_document_atomic_replacement_identity_and_delete(self):
+        from core.pipeline.documents import DocumentRequest, upsert_document
+        from unittest.mock import Mock, AsyncMock
+        embed = Mock(embed_batch=AsyncMock(side_effect=lambda texts: [[1.] + [0.]*767 for _ in texts]),
+                     get_model_name=lambda: 'test', get_dimension=lambda: 768)
+        config = self.settings.chunking_config
+        doc = DocumentRequest(content='VLM evidence.', title='Paper')
+        first = await upsert_document(self.store, embed, config, 'corpus', '1', doc)
+        again = await upsert_document(self.store, embed, config, 'corpus', '1', doc)
+        self.assertTrue(first['changed'])
+        self.assertFalse(again['changed'])
+        self.assertEqual(again['embeddings_generated'], 0)
+        self.assertEqual(embed.embed_batch.await_count, 1)
+        await upsert_document(self.store, embed, config, 'other', '1', doc)
+        self.assertEqual(await self.store.count(), 2)
+        async with self.pool.acquire() as conn:
+            await conn.execute("""CREATE FUNCTION reject_document() RETURNS trigger AS $$
+                BEGIN IF NEW.content='Rejected change.' THEN RAISE EXCEPTION 'rejected'; END IF;
+                RETURN NEW; END; $$ LANGUAGE plpgsql;
+                CREATE TRIGGER reject_document BEFORE INSERT ON embeddings
+                FOR EACH ROW EXECUTE FUNCTION reject_document();""")
+        with self.assertRaises(asyncpg.PostgresError):
+            await upsert_document(self.store, embed, config, 'corpus', '1', DocumentRequest(content='Rejected change.'))
+        self.assertEqual(await self.store.count(), 2)
+        rows = await self.store.hybrid_search('VLM', [1.]+[0.]*767, filter_dict={'collection':'corpus'})
+        self.assertEqual([r.chunk.content for r in rows], ['VLM evidence.'])
+        await upsert_document(self.store, embed, config, 'corpus', '1', DocumentRequest(content='New finding.'))
+        rows = await self.store.vector_search([1.]+[0.]*767, filter_dict={'collection':'corpus'})
+        self.assertEqual([r.chunk.content for r in rows], ['New finding.'])
+        await self.store.delete_document('corpus', '1')
+        await self.store.delete_document('corpus', '1')
+        self.assertEqual(await self.store.count(), 1)
+        async with self.pool.acquire() as conn:
+            await conn.execute((ROOT/'db/002_documents.sql').read_text())
+            self.assertEqual(await conn.fetchval('SELECT count(*) FROM documents'), 1)
+
     async def test_explicit_schema_reset(self):
         async with self.pool.acquire() as conn:
             await conn.execute("CREATE MATERIALIZED VIEW metrics_by_config AS SELECT count(*) FROM queries")
