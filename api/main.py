@@ -54,6 +54,7 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     try:
         app_state.settings = get_settings()
+        logging.getLogger().setLevel(app_state.settings.log_level.upper())
         app_state.db_pool = await asyncpg.create_pool(
             host=app_state.settings.postgres_host,
             port=app_state.settings.postgres_port,

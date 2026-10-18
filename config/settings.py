@@ -1,13 +1,11 @@
 """Application settings loaded from environment variables."""
 
 from functools import cached_property, lru_cache
-from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .models import ChunkingConfig, EmbeddingProviderConfig, RetrievalConfig, VectorStoreConfig
-
 
 class Settings(BaseSettings):
     """Application settings from environment variables."""
@@ -22,8 +20,6 @@ class Settings(BaseSettings):
     # ============================================
     # Application
     # ============================================
-    app_name: str = Field(default="rag-mcp-server", alias="APP_NAME")
-    environment: str = Field(default="local", alias="ENVIRONMENT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     api_port: int = Field(default=8000, alias="API_PORT")
     debug: bool = Field(default=False, alias="DEBUG")
@@ -38,23 +34,11 @@ class Settings(BaseSettings):
     postgres_password: str = Field(alias="POSTGRES_PASSWORD")
 
     db_pool_size: int = Field(default=10, ge=1, alias="DB_POOL_SIZE")
-    db_max_overflow: int = Field(default=20, alias="DB_MAX_OVERFLOW")
-
-    @property
-    def database_url(self) -> str:
-        return f"postgresql://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-
-    @property
-    def async_database_url(self) -> str:
-        return f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
 
     # ============================================
     # pgvector
     # ============================================
     pgvector_dimension: int = Field(default=768, alias="PGVECTOR_DIMENSION")
-    pgvector_index_type: str = Field(default="hnsw", alias="PGVECTOR_INDEX_TYPE")
-    pgvector_hnsw_m: int = Field(default=16, alias="PGVECTOR_HNSW_M")
-    pgvector_hnsw_ef_construction: int = Field(default=64, alias="PGVECTOR_HNSW_EF_CONSTRUCTION")
 
     # ============================================
     # Local Embeddings (sentence-transformers)
@@ -81,52 +65,19 @@ class Settings(BaseSettings):
     # ============================================
     retrieval_top_k: int = Field(default=5, alias="RETRIEVAL_TOP_K")
     hybrid_search_enabled: bool = Field(default=True, alias="HYBRID_SEARCH_ENABLED")
-    vector_weight: float = Field(default=0.7, alias="VECTOR_WEIGHT")
-    bm25_weight: float = Field(default=0.3, alias="BM25_WEIGHT")
     relevance_threshold: float = Field(default=0.7, alias="RELEVANCE_THRESHOLD")
 
     enable_reranking: bool = Field(default=False, alias="ENABLE_RERANKING")
     rerank_model: str = Field(default="cross-encoder/ms-marco-MiniLM-L-6-v2", alias="RERANK_MODEL")
     rerank_top_k: int = Field(default=10, alias="RERANK_TOP_K")
 
-    enable_query_expansion: bool = Field(default=False, alias="ENABLE_QUERY_EXPANSION")
-    expansion_method: Optional[str] = Field(default=None, alias="EXPANSION_METHOD")
-    max_expansions: int = Field(default=3, alias="MAX_EXPANSIONS")
-
     # ============================================
     # Metadata Boosting
     # ============================================
     recency_boost_enabled: bool = Field(default=True, alias="RECENCY_BOOST_ENABLED")
-    recency_very_recent_days: int = Field(default=30, alias="RECENCY_VERY_RECENT_DAYS")
-    recency_recent_days: int = Field(default=90, alias="RECENCY_RECENT_DAYS")
-    recency_moderate_days: int = Field(default=180, alias="RECENCY_MODERATE_DAYS")
-    recency_decay_rate: float = Field(default=730.0, alias="RECENCY_DECAY_RATE")
 
     quality_boost_enabled: bool = Field(default=True, alias="QUALITY_BOOST_ENABLED")
-    quality_min_feedback: int = Field(default=3, alias="QUALITY_MIN_FEEDBACK")
     popularity_boost_enabled: bool = Field(default=True, alias="POPULARITY_BOOST_ENABLED")
-
-    # ============================================
-    # Ingestion / Scraping
-    # ============================================
-    scrape_max_depth: int = Field(default=3, alias="SCRAPE_MAX_DEPTH")
-    scrape_max_pages: int = Field(default=100, alias="SCRAPE_MAX_PAGES")
-    scrape_timeout_seconds: int = Field(default=10, alias="SCRAPE_TIMEOUT_SECONDS")
-    scrape_user_agent: str = Field(default="RAG-MCP-Bot/1.0", alias="SCRAPE_USER_AGENT")
-
-    playwright_headless: bool = Field(default=True, alias="PLAYWRIGHT_HEADLESS")
-    playwright_timeout: int = Field(default=30000, alias="PLAYWRIGHT_TIMEOUT")
-
-    # ============================================
-    # Monitoring
-    # ============================================
-    log_queries: bool = Field(default=True, alias="LOG_QUERIES")
-    log_responses: bool = Field(default=True, alias="LOG_RESPONSES")
-    log_format: str = Field(default="json", alias="LOG_FORMAT")
-
-    metrics_enabled: bool = Field(default=True, alias="METRICS_ENABLED")
-    metrics_export_interval_seconds: int = Field(default=60, alias="METRICS_EXPORT_INTERVAL_SECONDS")
-
 
     @cached_property
     def vector_store_config(self) -> VectorStoreConfig:
@@ -152,14 +103,12 @@ class Settings(BaseSettings):
     def retrieval_config(self) -> RetrievalConfig:
         return RetrievalConfig(
             top_k=self.retrieval_top_k, hybrid_search=self.hybrid_search_enabled,
-            vector_weight=self.vector_weight, bm25_weight=self.bm25_weight,
             relevance_threshold=self.relevance_threshold,
             enable_reranking=self.enable_reranking, rerank_model=self.rerank_model,
             rerank_top_k=self.rerank_top_k, recency_boost_enabled=self.recency_boost_enabled,
             quality_boost_enabled=self.quality_boost_enabled,
             popularity_boost_enabled=self.popularity_boost_enabled,
         )
-
 
 @lru_cache()
 def get_settings() -> Settings:

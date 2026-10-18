@@ -1,0 +1,20 @@
+# Send only build instructions, dependencies and runtime source to Docker.
+**
+!.dockerignore
+!Dockerfile
+!requirements.txt
+!cli.py
+!api/
+!api/**
+!config/
+!config/**
+!core/
+!core/**
+
+# Exclude generated files and local settings even inside runtime directories.
+**/__pycache__
+**/*.py[cod]
+**/.venv
+**/.cache
+**/.env*
+**/.DS_Store

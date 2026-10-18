@@ -52,6 +52,8 @@ docker compose logs -f rag-service
 docker compose down
 ```
 
+The Docker build context includes only runtime source and dependency/build files; local virtual environments, `.env`, Git history, tests and downloaded models are excluded. The Dockerfile uses a separate dependency build stage and a pip download cache; compilers and that cache stay out of the runtime image. Application-only edits reuse the dependency layer.
+
 Compose runs only the API. `API_PORT` controls its published host port; the container listens on 8000. Model downloads persist in the `embeddings_cache` volume through `HF_HOME=/app/.cache/huggingface`. The API has no authentication; bind/publish it to your intended network.
 
 ## Ingest and search
@@ -92,7 +94,7 @@ RERANK_TOP_K=10
 
 Retrieval selects up to `max(top_k, RERANK_TOP_K)` candidates, the local cross-encoder scores query/document pairs, and the service returns the best `top_k` chunks. Models are reused and inference runs outside the async event loop. Reranking errors fail the request rather than silently returning a different ranking.
 
-All embedding, chunking, retrieval, and reranking configuration comes from `.env` or environment variables (environment variables take precedence). For example, `CHUNK_SIZE=200` controls ingestion chunks and `RETRIEVAL_TOP_K=5` controls the default number of returned chunks. A request's `top_k` overrides that retrieval default; metadata `filters` remain request-specific. Restart the API after changing configuration. Changing the embedding model requires re-ingesting existing documents, even if the vector dimension stays the same.
+All embedding, chunking, retrieval, and reranking configuration comes from `.env` or environment variables (environment variables take precedence). For example, `CHUNK_SIZE=200` controls ingestion chunks and `RETRIEVAL_TOP_K=5` controls the default number of returned chunks. A request's `top_k` overrides that retrieval default; metadata `filters` remain request-specific. Restart the API after changing configuration. The template lists only active settings: index tuning belongs in `db/init.sql`, crawling depth/page limits are request fields, and hybrid search uses fixed reciprocal rank fusion weights. `RELEVANCE_THRESHOLD` applies only to pure vector search. Changing the embedding model requires re-ingesting existing documents, even if the vector dimension stays the same.
 
 ### API compatibility
 

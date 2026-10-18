@@ -1,10 +1,9 @@
 services:
-  # RAG Testing API
-  rag-service:
+  lassy:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: rag-service
+    container_name: lassy
     env_file:
       - .env
     environment:
