@@ -74,6 +74,10 @@ class DocumentChunker:
         else:
             raise ValueError(f"Unknown chunking strategy: {self.strategy}")
 
+        if not chunks:
+            # A valid short summary/section is still a searchable document.
+            chunks = [content]
+
         # Convert to ChunkResult objects
         results = []
         for i, chunk_text in enumerate(chunks):

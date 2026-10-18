@@ -5,9 +5,10 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Literal, Optional
+from datetime import datetime
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 from config import Settings, get_settings
 from core.metrics import MetricsTracker
 from core.pipeline import IngestionPipeline, IngestionRequest
+from core.pipeline.documents import DocumentRequest, upsert_document
 from core.retrieval import Retriever
 from core.providers import ProviderFactory
 
@@ -88,9 +90,9 @@ async def check_readiness(check_model: bool = False):
         raise RuntimeError("Database pool is unavailable")
     async with app_state.db_pool.acquire() as conn:
         await conn.fetchval("SELECT 1")
-        for table in ("embeddings", "queries", "metrics", "feedback"):
+        for table in ("embeddings", "queries", "metrics", "feedback", "documents"):
             if not await conn.fetchval("SELECT to_regclass($1)", f"public.{table}"):
-                raise RuntimeError(f"Missing table {table}; initialize a fresh database with db/init.sql")
+                raise RuntimeError(f"Missing table {table}; initialize with db/init.sql; existing installations apply db/002_documents.sql")
         try:
             await conn.execute("SELECT latency_rerank_ms FROM metrics LIMIT 0")
         except asyncpg.UndefinedColumnError as exc:
@@ -278,6 +280,27 @@ async def ingest(request: IngestRequest):
         await pipeline.close()
 
 
+@app.put("/documents/{collection}/{document_id}")
+async def put_document(request: DocumentRequest,
+                       collection: str = Path(min_length=1, max_length=200),
+                       document_id: str = Path(min_length=1, max_length=500)):
+    settings = app_state.settings
+    store = app_state.provider_factory.create_vector_store(settings.vector_store_config)
+    embedder = await app_state.provider_factory.get_embedding_provider(settings.embedding_config)
+    try:
+        return await upsert_document(store, embedder, settings.chunking_config,
+                                     collection, document_id, request)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/documents/{collection}/{document_id}")
+async def delete_document(collection: str, document_id: str):
+    store = app_state.provider_factory.create_vector_store(app_state.settings.vector_store_config)
+    await store.delete_document(collection, document_id)
+    return {"deleted": True, "collection": collection, "document_id": document_id}
+
+
 @app.post("/query")
 async def query(request: QueryRequestAPI):
     """Query the knowledge base.
@@ -340,7 +363,12 @@ async def query(request: QueryRequestAPI):
             "url": str(result.metadata.get("source_url") or result.metadata.get("url") or "").strip(),
             "score": result.boosted_score,
             "rerank_score": result.rerank_score,
-            "section": result.metadata.get("chunk_index"),
+            "section": result.metadata.get("section_ref") or result.metadata.get("chunk_index"),
+            "collection": result.metadata.get("collection"),
+            "document_id": result.metadata.get("document_id"),
+            "revision": result.metadata.get("revision"),
+            "content_type": result.metadata.get("content_type"),
+            "published_at": result.metadata.get("published_at"),
             "last_modified": result.metadata.get("last_modified"),
         }
         for i, result in enumerate(retrieved_results, start=1)
