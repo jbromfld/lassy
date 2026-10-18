@@ -130,7 +130,7 @@ class IngestRequest(BaseModel):
     metadata: Optional[Dict[str, Any]] = Field(
         None, description="Additional metadata")
     profile: str = Field(
-        "baseline-local", description="Configuration profile name")
+        "default", description="Configuration profile name")
     # Crawling parameters
     depth: int = Field(
         1, ge=1, le=5, description="Maximum crawl depth (1 = only URL, 2+ = recursive)")
@@ -151,7 +151,7 @@ class QueryRequestAPI(BaseModel):
     filters: Optional[Dict[str, Any]] = Field(
         None, description="Metadata filters")
     profile: str = Field(
-        "baseline-local", description="Configuration profile name")
+        "default", description="Configuration profile name")
     retrieve_only: bool = Field(
         False, description="Skip LLM generation, return only retrieved chunks")
 
@@ -307,17 +307,6 @@ async def query(request: QueryRequestAPI):
     )
     embedding_provider = app_state.provider_factory.create_embedding_provider(
         profile.provider_config.embedding
-    )
-    llm_provider = app_state.provider_factory.create_llm_provider(
-        profile.provider_config.llm
-    )
-
-    # Create query pipeline
-    pipeline = QueryPipeline(
-        vector_store=vector_store,
-        embedding_provider=embedding_provider,
-        llm_provider=llm_provider,
-        profile=profile,
     )
 
     # Process query
@@ -480,6 +469,18 @@ async def query(request: QueryRequestAPI):
             f"Retrieve-only chunks URLs: {[chunk.get('url', 'N/A') for chunk in chunks[:5]]}")
 
         return response_data
+
+    llm_provider = app_state.provider_factory.create_llm_provider(
+        profile.provider_config.llm
+    )
+
+    # Create query pipeline
+    pipeline = QueryPipeline(
+        vector_store=vector_store,
+        embedding_provider=embedding_provider,
+        llm_provider=llm_provider,
+        profile=profile,
+    )
 
     # Standard mode: Full RAG pipeline with LLM generation
     logger.debug("Processing query in standard mode (with LLM generation)")

@@ -16,7 +16,6 @@ from .models import (
     LLMProviderConfig,
     ProviderConfig,
     RetrievalConfig,
-    SystemConfig,
     VectorStoreConfig,
 )
 from .settings import Settings, get_settings
@@ -117,17 +116,16 @@ class ConfigLoader:
                 INSERT INTO configuration_profiles (
                     profile_id, profile_name, version, parent_profile_id,
                     provider_config, chunking_config, retrieval_config,
-                    generation_config, system_config, description,
-                    is_active, created_at, created_by
+                    generation_config, description, is_active,
+                    created_at, created_by
                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
                 )
                 ON CONFLICT (profile_name, version) DO UPDATE SET
                     provider_config = EXCLUDED.provider_config,
                     chunking_config = EXCLUDED.chunking_config,
                     retrieval_config = EXCLUDED.retrieval_config,
                     generation_config = EXCLUDED.generation_config,
-                    system_config = EXCLUDED.system_config,
                     description = EXCLUDED.description,
                     is_active = EXCLUDED.is_active
             """
@@ -142,7 +140,6 @@ class ConfigLoader:
                 json.dumps(profile.chunking_config.model_dump(mode="json")),
                 json.dumps(profile.retrieval_config.model_dump(mode="json")),
                 json.dumps(profile.generation_config.model_dump(mode="json")),
-                json.dumps(profile.system_config.model_dump(mode="json")),
                 profile.description,
                 profile.is_active,
                 profile.created_at,
@@ -175,10 +172,10 @@ class ConfigLoader:
             device=s.local_embedding_device,
         )
 
-        # LLM config (copilot or mcp passthrough)
+        # LLM config
         llm = LLMProviderConfig(
             provider="copilot",
-            model=s.copilot_model,
+            model="auto",
             temperature=s.copilot_temperature,
             max_tokens=s.copilot_max_tokens,
             api_key=s.copilot_api_key,
@@ -232,20 +229,6 @@ class ConfigLoader:
             toxic_filter=s.toxic_filter_enabled,
         )
 
-        # System config
-        system_config = SystemConfig(
-            timeout_seconds=s.request_timeout_seconds,
-            max_retries=s.max_retries,
-            retry_backoff=s.retry_backoff,
-            enable_caching=s.enable_caching,
-            cache_ttl_seconds=s.cache_ttl_seconds,
-            log_level=s.log_level,
-            log_queries=s.log_queries,
-            log_responses=s.log_responses,
-            rate_limit_per_minute=s.rate_limit_per_minute,
-            burst_limit=s.burst_limit,
-        )
-
         # Create profile
         return ConfigurationProfile(
             profile_name="default",
@@ -254,7 +237,6 @@ class ConfigLoader:
             chunking_config=chunking_config,
             retrieval_config=retrieval_config,
             generation_config=generation_config,
-            system_config=system_config,
             description="Default configuration from environment variables",
             created_by="system",
         )
@@ -273,8 +255,6 @@ class ConfigLoader:
         chunking_config_data = row["chunking_config"] if isinstance(row["chunking_config"], dict) else json.loads(row["chunking_config"])
         retrieval_config_data = row["retrieval_config"] if isinstance(row["retrieval_config"], dict) else json.loads(row["retrieval_config"])
         generation_config_data = row["generation_config"] if isinstance(row["generation_config"], dict) else json.loads(row["generation_config"])
-        system_config_data = row["system_config"] if isinstance(row["system_config"], dict) else json.loads(row["system_config"])
-
         return ConfigurationProfile(
             profile_id=row["profile_id"],
             profile_name=row["profile_name"],
@@ -284,7 +264,6 @@ class ConfigLoader:
             chunking_config=ChunkingConfig(**chunking_config_data),
             retrieval_config=RetrievalConfig(**retrieval_config_data),
             generation_config=GenerationConfig(**generation_config_data),
-            system_config=SystemConfig(**system_config_data),
             description=row["description"],
             is_active=row["is_active"],
             created_at=row["created_at"],

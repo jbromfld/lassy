@@ -7,7 +7,6 @@ from .models import (
     LLMProviderConfig,
     ProviderConfig,
     RetrievalConfig,
-    SystemConfig,
     VectorStoreConfig,
     ConfigurationProfile,
 )
@@ -21,7 +20,6 @@ __all__ = [
     "LLMProviderConfig",
     "ProviderConfig",
     "RetrievalConfig",
-    "SystemConfig",
     "VectorStoreConfig",
     "ConfigurationProfile",
     "ConfigLoader",

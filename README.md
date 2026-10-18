@@ -1,8 +1,8 @@
-# RAG MCP Server
+# RAG MCP Service
 
-A RAG (Retrieval-Augmented Generation) ingestion and retrieval service that acts as an MCP backend for GitHub Copilot (or any MCP-compatible client).
+A RAG (Retrieval-Augmented Generation) ingestion and retrieval service for GitHub Copilot.
 
-The service handles **ingestion** (scraping, chunking, embedding, storing in pgvector) and **retrieval** (hybrid vector + keyword search). Generation is delegated to Copilot via the MCP pass-through.
+The service handles **ingestion** (scraping, chunking, embedding, storing in pgvector), **retrieval** (hybrid vector + keyword search), and **generation** through the Copilot API. A retrieve-only mode still exists when a caller wants raw chunks back.
 
 ---
 
@@ -17,7 +17,8 @@ You (in Copilot)
                       └── Copilot synthesizes the answer
 ```
 
-The `default` profile uses the `mcp` provider — the RAG service returns raw chunks and Copilot handles generation.
+The `default` profile uses the Copilot provider for full RAG responses.
+Profiles are now intended to capture retrieval and summarization presets: embedding choice, chunking, retrieval settings, and LLM hyperparameters.
 
 ---
 
@@ -33,17 +34,17 @@ cp .env.template .env
 # 3. Ingest a knowledge source
 python cli.py ringest https://your-docs-url.com 2 50
 
-# 4. Query (retrieval only — for MCP)
+# 4. Query
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "How do I configure X?", "retrieve_only": true, "profile": "default"}'
+  -d '{"query": "How do I configure X?", "profile": "default"}'
 ```
 
 ---
 
-## MCP Configuration
+## Copilot Integration
 
-`.mcp.json` wires Copilot to the local `kbsearch-mcp-server`, which calls this service's `/query` endpoint with `retrieve_only: true`.
+`.mcp.json` can still wire Copilot to a local MCP server, but this service no longer depends on an internal `mcp` LLM provider. Callers that want raw retrieval results can keep using `retrieve_only: true`.
 
 ```json
 {
@@ -74,18 +75,17 @@ Scrape and embed a URL into the knowledge base.
 ```
 
 ### `POST /query`
-Retrieve relevant chunks. Use `retrieve_only: true` for MCP pass-through.
+Run retrieval and generate a Copilot-backed answer. Use `retrieve_only: true` only when the caller wants raw chunks instead of generation.
 
 ```json
 {
   "query": "How do I configure X?",
   "top_k": 5,
-  "retrieve_only": true,
   "profile": "default"
 }
 ```
 
-Returns chunks with citations and relevance scores for Copilot to synthesize.
+Returns an answer with citations by default, or chunks with citations and relevance scores when `retrieve_only` is set.
 
 ### `POST /feedback`
 Submit feedback (0–10) on a query response to improve future retrieval.
@@ -99,8 +99,10 @@ View retrieval latency, chunk scores, and feedback statistics.
 
 | Profile | Description |
 |---|---|
-| `default` | MCP pass-through — retrieval only, Copilot generates |
-| `copilot-gpt4o` | Copilot API handles full RAG + generation |
+| `default` | Copilot API handles full RAG + generation |
+| `copilot-gpt4o` | Explicit Copilot GPT-4o profile |
+
+Use profiles when you want to vary embedding, chunking, retrieval, or summary behavior. Global service settings remain environment-level configuration.
 
 ---
 

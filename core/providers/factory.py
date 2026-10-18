@@ -57,11 +57,6 @@ class ProviderFactory:
 
             return CopilotProvider(config)
 
-        elif config.provider == "mcp":
-            from .llm.mcp import MCPProvider
-
-            return MCPProvider(config)
-
         else:
             raise ValueError(f"Unknown LLM provider: {config.provider}")
 

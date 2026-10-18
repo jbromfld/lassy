@@ -69,7 +69,6 @@ class Settings(BaseSettings):
     # GitHub Copilot
     # ============================================
     copilot_api_key: Optional[str] = Field(default=None, alias="COPILOT_API_KEY")
-    copilot_model: str = Field(default="gpt-4o", alias="COPILOT_MODEL")
     copilot_temperature: float = Field(default=0.7, alias="COPILOT_TEMPERATURE")
     copilot_max_tokens: int = Field(default=2000, alias="COPILOT_MAX_TOKENS")
 
@@ -126,19 +125,6 @@ class Settings(BaseSettings):
     content_filter_enabled: bool = Field(default=True, alias="CONTENT_FILTER_ENABLED")
     pii_detection_enabled: bool = Field(default=False, alias="PII_DETECTION_ENABLED")
     toxic_filter_enabled: bool = Field(default=False, alias="TOXIC_FILTER_ENABLED")
-
-    # ============================================
-    # System
-    # ============================================
-    request_timeout_seconds: int = Field(default=30, alias="REQUEST_TIMEOUT_SECONDS")
-    max_retries: int = Field(default=3, alias="MAX_RETRIES")
-    retry_backoff: str = Field(default="exponential", alias="RETRY_BACKOFF")
-
-    enable_caching: bool = Field(default=True, alias="ENABLE_CACHING")
-    cache_ttl_seconds: int = Field(default=3600, alias="CACHE_TTL_SECONDS")
-
-    rate_limit_per_minute: int = Field(default=60, alias="RATE_LIMIT_PER_MINUTE")
-    burst_limit: int = Field(default=10, alias="BURST_LIMIT")
 
     # ============================================
     # Ingestion / Scraping

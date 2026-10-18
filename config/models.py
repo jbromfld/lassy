@@ -23,7 +23,6 @@ class EmbeddingProvider(str, Enum):
 
 class LLMProvider(str, Enum):
     COPILOT = "copilot"
-    MCP = "mcp"
 
 
 class ChunkStrategy(str, Enum):
@@ -85,7 +84,7 @@ class EmbeddingProviderConfig(BaseModel):
 
 
 class LLMProviderConfig(BaseModel):
-    """LLM provider configuration (copilot or mcp passthrough)."""
+    """LLM provider configuration."""
 
     provider: LLMProvider
     model: str
@@ -195,29 +194,6 @@ class GenerationConfig(BaseModel):
         use_enum_values = True
 
 
-class SystemConfig(BaseModel):
-    """System-level configuration."""
-
-    timeout_seconds: int = Field(default=30, ge=5, le=300)
-    max_retries: int = Field(default=3, ge=0, le=10)
-    retry_backoff: str = "exponential"
-
-    enable_caching: bool = True
-    cache_ttl_seconds: int = Field(default=3600, ge=60, le=86400)
-
-    log_level: str = "INFO"
-    log_queries: bool = True
-    log_responses: bool = True
-
-    rate_limit_per_minute: int = Field(default=60, ge=1, le=1000)
-    burst_limit: int = Field(default=10, ge=1, le=100)
-
-
-# ============================================
-# Configuration Profile
-# ============================================
-
-
 class ConfigurationProfile(BaseModel):
     """Complete configuration profile."""
 
@@ -231,7 +207,6 @@ class ConfigurationProfile(BaseModel):
     chunking_config: ChunkingConfig
     retrieval_config: RetrievalConfig
     generation_config: GenerationConfig
-    system_config: SystemConfig
 
     description: Optional[str] = None
     is_active: bool = True
@@ -251,12 +226,11 @@ class ConfigurationProfile(BaseModel):
                         "model": "sentence-transformers/all-mpnet-base-v2",
                         "dimension": 768,
                     },
-                    "llm": {"provider": "mcp", "model": "passthrough"},
+                    "llm": {"provider": "copilot", "model": "auto"},
                 },
                 "chunking_config": {"strategy": "recursive", "chunk_size": 300, "chunk_overlap": 30},
                 "retrieval_config": {"top_k": 5, "hybrid_search": True, "vector_weight": 0.7},
                 "generation_config": {"prompt_template": "default", "max_context_tokens": 8000},
-                "system_config": {"timeout_seconds": 30, "enable_caching": True},
             }
         }
 
@@ -271,7 +245,6 @@ class ConfigurationProfile(BaseModel):
             "chunking_config": self.chunking_config.model_dump(mode="json"),
             "retrieval_config": self.retrieval_config.model_dump(mode="json"),
             "generation_config": self.generation_config.model_dump(mode="json"),
-            "system_config": self.system_config.model_dump(mode="json"),
             "description": self.description,
             "is_active": self.is_active,
             "created_at": self.created_at,

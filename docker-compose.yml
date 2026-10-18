@@ -5,38 +5,16 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: rag-service
-    environment:
-      - POSTGRES_HOST=${POSTGRES_HOST}
-      - POSTGRES_PORT=${POSTGRES_PORT}
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      # Optional local ollama support
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
-      - ENVIRONMENT=${ENVIRONMENT}
-      # Cloud provider API keys
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - AWS_REGION=${AWS_REGION}
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - COPILOT_API_KEY=${COPILOT_API_KEY}
-      - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
+    env_file:
+      - .env
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     volumes:
-      - .:/app
       - embeddings_cache:/app/.cache
-    networks:
-      - rag-network
     extra_hosts:
       - "host.docker.internal:host-gateway" # Enable host.docker.internal on Linux
-    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload # Use --reload for development, remove for production
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
 
 volumes:
   embeddings_cache:
     driver: local
-
-networks:
-  rag-network:
-    driver: bridge
