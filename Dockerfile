@@ -9,7 +9,6 @@ WORKDIR /app
 # Only runtime libraries; every Python dependency must have a binary wheel.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     libgomp1 \
-    libpq5 \
     libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 appuser \
@@ -27,7 +26,7 @@ COPY --chown=appuser:appuser cli.py ./cli.py
 
 USER appuser
 EXPOSE 8000
-HEALTHCHECK --interval=360s --timeout=10s --start-period=40s --retries=3 \
+HEALTHCHECK --interval=10s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 

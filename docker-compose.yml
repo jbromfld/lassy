@@ -8,14 +8,12 @@ services:
       - .env
     environment:
       HF_HOME: /app/.cache/huggingface
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
     ports:
       - "${API_PORT:-8082}:8000"
     volumes:
-      - embeddings_cache:/app/.cache
+      - ${MODEL_CACHE_DIR:-./.cache/huggingface}:/app/.cache/huggingface
     extra_hosts:
       - "host.docker.internal:host-gateway" # Enable host.docker.internal on Linux
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000
 
-volumes:
-  embeddings_cache:
-    driver: local
