@@ -52,7 +52,7 @@ docker compose logs -f rag-service
 docker compose down
 ```
 
-The Docker build context includes only runtime source and dependency/build files; local virtual environments, `.env`, Git history, tests and downloaded models are excluded. The Dockerfile uses a separate dependency build stage and a pip download cache; compilers and that cache stay out of the runtime image. Application-only edits reuse the dependency layer.
+The Docker build context includes only runtime source and dependency/build files; local virtual environments, `.env`, Git history, tests and downloaded models are excluded. The Dockerfile installs binary wheels directly with a BuildKit pip download cache, skips bytecode compilation, and installs no compiler toolchain. Application-only edits reuse the dependency layer. Builds require compatible wheels for the target Python/Linux architecture and fail instead of compiling packages from source.
 
 Compose runs only the API. `API_PORT` controls its published host port; the container listens on 8000. Model downloads persist in the `embeddings_cache` volume through `HF_HOME=/app/.cache/huggingface`. The API has no authentication; bind/publish it to your intended network.
 

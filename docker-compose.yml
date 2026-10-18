@@ -9,7 +9,7 @@ services:
     environment:
       HF_HOME: /app/.cache/huggingface
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "${API_PORT:-8082}:8000"
     volumes:
       - embeddings_cache:/app/.cache
     extra_hosts:
