@@ -1,10 +1,12 @@
 """Application settings loaded from environment variables."""
 
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .models import ChunkingConfig, EmbeddingProviderConfig, RetrievalConfig, VectorStoreConfig
 
 
 class Settings(BaseSettings):
@@ -35,7 +37,7 @@ class Settings(BaseSettings):
     postgres_user: str = Field(alias="POSTGRES_USER")
     postgres_password: str = Field(alias="POSTGRES_PASSWORD")
 
-    db_pool_size: int = Field(default=10, alias="DB_POOL_SIZE")
+    db_pool_size: int = Field(default=10, ge=1, alias="DB_POOL_SIZE")
     db_max_overflow: int = Field(default=20, alias="DB_MAX_OVERFLOW")
 
     @property
@@ -66,13 +68,6 @@ class Settings(BaseSettings):
     local_embedding_device: str = Field(default="cpu", alias="LOCAL_EMBEDDING_DEVICE")
 
     # ============================================
-    # GitHub Copilot
-    # ============================================
-    copilot_api_key: Optional[str] = Field(default=None, alias="COPILOT_API_KEY")
-    copilot_temperature: float = Field(default=0.7, alias="COPILOT_TEMPERATURE")
-    copilot_max_tokens: int = Field(default=2000, alias="COPILOT_MAX_TOKENS")
-
-    # ============================================
     # Chunking
     # ============================================
     chunk_strategy: str = Field(default="recursive", alias="CHUNK_STRATEGY")
@@ -91,7 +86,7 @@ class Settings(BaseSettings):
     relevance_threshold: float = Field(default=0.7, alias="RELEVANCE_THRESHOLD")
 
     enable_reranking: bool = Field(default=False, alias="ENABLE_RERANKING")
-    rerank_model: Optional[str] = Field(default=None, alias="RERANK_MODEL")
+    rerank_model: str = Field(default="cross-encoder/ms-marco-MiniLM-L-6-v2", alias="RERANK_MODEL")
     rerank_top_k: int = Field(default=10, alias="RERANK_TOP_K")
 
     enable_query_expansion: bool = Field(default=False, alias="ENABLE_QUERY_EXPANSION")
@@ -110,21 +105,6 @@ class Settings(BaseSettings):
     quality_boost_enabled: bool = Field(default=True, alias="QUALITY_BOOST_ENABLED")
     quality_min_feedback: int = Field(default=3, alias="QUALITY_MIN_FEEDBACK")
     popularity_boost_enabled: bool = Field(default=True, alias="POPULARITY_BOOST_ENABLED")
-
-    # ============================================
-    # Generation
-    # ============================================
-    prompt_template: str = Field(default="default", alias="PROMPT_TEMPLATE")
-    prompt_version: str = Field(default="1.0", alias="PROMPT_VERSION")
-    include_sources: bool = Field(default=True, alias="INCLUDE_SOURCES")
-    max_context_tokens: int = Field(default=8000, alias="MAX_CONTEXT_TOKENS")
-    response_format: str = Field(default="markdown", alias="RESPONSE_FORMAT")
-    include_citations: bool = Field(default=True, alias="INCLUDE_CITATIONS")
-    citation_format: str = Field(default="inline", alias="CITATION_FORMAT")
-
-    content_filter_enabled: bool = Field(default=True, alias="CONTENT_FILTER_ENABLED")
-    pii_detection_enabled: bool = Field(default=False, alias="PII_DETECTION_ENABLED")
-    toxic_filter_enabled: bool = Field(default=False, alias="TOXIC_FILTER_ENABLED")
 
     # ============================================
     # Ingestion / Scraping
@@ -146,6 +126,39 @@ class Settings(BaseSettings):
 
     metrics_enabled: bool = Field(default=True, alias="METRICS_ENABLED")
     metrics_export_interval_seconds: int = Field(default=60, alias="METRICS_EXPORT_INTERVAL_SECONDS")
+
+
+    @cached_property
+    def vector_store_config(self) -> VectorStoreConfig:
+        return VectorStoreConfig(provider="postgresql", dimension=self.pgvector_dimension)
+
+    @cached_property
+    def embedding_config(self) -> EmbeddingProviderConfig:
+        return EmbeddingProviderConfig(
+            provider="local", model=self.local_embedding_model,
+            dimension=self.local_embedding_dimension, batch_size=self.local_embedding_batch_size,
+            device=self.local_embedding_device,
+        )
+
+    @cached_property
+    def chunking_config(self) -> ChunkingConfig:
+        return ChunkingConfig(
+            strategy=self.chunk_strategy, chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap, min_chunk_size=self.min_chunk_size,
+            max_chunk_size=self.max_chunk_size,
+        )
+
+    @cached_property
+    def retrieval_config(self) -> RetrievalConfig:
+        return RetrievalConfig(
+            top_k=self.retrieval_top_k, hybrid_search=self.hybrid_search_enabled,
+            vector_weight=self.vector_weight, bm25_weight=self.bm25_weight,
+            relevance_threshold=self.relevance_threshold,
+            enable_reranking=self.enable_reranking, rerank_model=self.rerank_model,
+            rerank_top_k=self.rerank_top_k, recency_boost_enabled=self.recency_boost_enabled,
+            quality_boost_enabled=self.quality_boost_enabled,
+            popularity_boost_enabled=self.popularity_boost_enabled,
+        )
 
 
 @lru_cache()

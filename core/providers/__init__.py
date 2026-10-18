@@ -1,11 +1,10 @@
-"""Provider abstractions for embeddings, LLMs, and vector stores."""
+"""Provider abstractions for embeddings and vector stores."""
 
-from .base import EmbeddingProvider, LLMProvider, VectorStore
+from .base import EmbeddingProvider, VectorStore
 from .factory import ProviderFactory
 
 __all__ = [
     "EmbeddingProvider",
-    "LLMProvider",
     "VectorStore",
     "ProviderFactory",
 ]

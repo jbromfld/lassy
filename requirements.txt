@@ -18,27 +18,10 @@ torch>=2.5.0,<2.6.0  # Latest stable, CUDA 12.x support
 transformers==4.47.1  # Latest with new model architectures
 huggingface-hub==0.26.5  # Latest with improved caching
 
-# LLM Providers
-# Ollama (via HTTP client)
-httpx==0.28.1  # Latest with HTTP/2 improvements
-aiohttp==3.11.11  # Security updates, Python 3.11+ optimized
-
-# OpenAI (Direct API)
-openai==1.57.4  # Latest with structured outputs improvements
-
-# Anthropic Claude
-anthropic==0.42.0  # Latest with prompt caching, tool use improvements
-
-# AWS Bedrock
-boto3==1.35.94  # Latest with newest model support (Claude 3.7, Nova)
-botocore==1.35.94  # Should match boto3 version
-
-# GCP Vertex AI (optional - uncomment if needed)
-# google-cloud-aiplatform==1.76.0  # Latest with Gemini 2.0 support
-# google-auth==2.37.0  # Security updates
-
-# Azure OpenAI (uses openai package above)
-# azure-identity==1.19.0  # Latest with security improvements
+# HTTP client (CLI and API tests)
+httpx==0.28.1
+aiohttp==3.11.11
+requests==2.32.3
 
 # Web Scraping & Document Processing
 beautifulsoup4==4.12.3  # Latest minor update

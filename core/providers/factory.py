@@ -1,16 +1,17 @@
 """Factory for creating provider instances."""
 
+import asyncio
 from typing import Optional
 
 from asyncpg import Pool
 
 from config.models import (
     EmbeddingProviderConfig,
-    LLMProviderConfig,
+    RetrievalConfig,
     VectorStoreConfig,
 )
 
-from .base import EmbeddingProvider, LLMProvider, VectorStore
+from .base import EmbeddingProvider, VectorStore
 
 
 class ProviderFactory:
@@ -23,6 +24,33 @@ class ProviderFactory:
             db_pool: Optional database connection pool for PostgreSQL vector store
         """
         self.db_pool = db_pool
+        self._embeddings = {}
+        self._rerankers = {}
+        self._embedding_lock = asyncio.Lock()
+
+    async def get_embedding_provider(self, config: EmbeddingProviderConfig) -> EmbeddingProvider:
+        key = config.model_dump_json()
+        async with self._embedding_lock:
+            if key not in self._embeddings:
+                self._embeddings[key] = await asyncio.to_thread(self.create_embedding_provider, config)
+            return self._embeddings[key]
+
+    async def get_reranker(self, config: RetrievalConfig, device: str):
+        if not config.enable_reranking:
+            return None
+        from core.retrieval.reranker import LocalReranker
+        key = (config.rerank_model, device)
+        async with self._embedding_lock:
+            if key not in self._rerankers:
+                self._rerankers[key] = await asyncio.to_thread(LocalReranker, *key)
+            return self._rerankers[key]
+
+    async def close(self):
+        for provider in [*self._embeddings.values(), *self._rerankers.values()]:
+            if hasattr(provider, "close"):
+                await provider.close()
+        self._embeddings.clear()
+        self._rerankers.clear()
 
     def create_embedding_provider(
         self, config: EmbeddingProviderConfig
@@ -42,23 +70,6 @@ class ProviderFactory:
 
         else:
             raise ValueError(f"Unknown embedding provider: {config.provider}")
-
-    def create_llm_provider(self, config: LLMProviderConfig) -> LLMProvider:
-        """Create LLM provider instance.
-
-        Args:
-            config: LLM provider configuration
-
-        Returns:
-            LLMProvider instance
-        """
-        if config.provider == "copilot":
-            from .llm.copilot import CopilotProvider
-
-            return CopilotProvider(config)
-
-        else:
-            raise ValueError(f"Unknown LLM provider: {config.provider}")
 
     def create_vector_store(self, config: VectorStoreConfig) -> VectorStore:
         """Create vector store instance.

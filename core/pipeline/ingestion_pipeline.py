@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
-from config.models import ConfigurationProfile
+from config.models import ChunkingConfig
 from core.ingestion.chunker import DocumentChunker
 from core.ingestion.scraper import DocumentScraper
 from core.providers.base import Chunk, EmbeddingProvider, VectorStore
@@ -50,21 +50,20 @@ class IngestionPipeline:
         self,
         vector_store: VectorStore,
         embedding_provider: EmbeddingProvider,
-        profile: ConfigurationProfile,
+        chunking_config: ChunkingConfig,
     ):
         """Initialize ingestion pipeline.
 
         Args:
             vector_store: Vector store instance
             embedding_provider: Embedding provider instance
-            profile: Configuration profile
+            chunking_config: Chunking settings
         """
         self.vector_store = vector_store
         self.embedding_provider = embedding_provider
-        self.profile = profile
 
         # Create chunker
-        self.chunker = DocumentChunker(profile.chunking_config)
+        self.chunker = DocumentChunker(chunking_config)
 
         # Create scraper
         self.scraper = DocumentScraper()
@@ -131,18 +130,14 @@ class IngestionPipeline:
             # Step 2: Delete existing chunks for these URLs (to prevent duplicates)
             for doc in documents:
                 if doc.url and doc.url != "direct-content":
-                    # Delete any existing chunks from this URL for this profile
+                    # Replace existing content from this source URL
                     await self.vector_store.delete_by_filter({
-                        "url": doc.url,
-                        "profile_id": str(self.profile.profile_id)
+                        "source_url": doc.url
                     })
 
             # Step 3: Process all documents
             all_chunks = []
             for doc in documents:
-                # Add profile to metadata
-                doc.metadata["profile_id"] = str(self.profile.profile_id)
-
                 # Chunk document
                 chunk_results = self.chunker.chunk_document(
                     doc.content, doc.metadata)

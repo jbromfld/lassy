@@ -53,8 +53,7 @@ docker-compose-local.yml
 # Setup Scripts
 setup-local.sh
 
-# Environment Variables
-.env.template
+# Environment template is tracked; .env remains ignored
 # Logs
 *.log
 logs/

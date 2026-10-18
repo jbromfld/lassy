@@ -18,7 +18,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create cache directory for sentence-transformers models
-RUN mkdir -p .cache
+ENV HF_HOME=/app/.cache/huggingface
+RUN mkdir -p .cache/huggingface
 
 # Expose port
 EXPOSE 8000

@@ -1,5 +1,7 @@
 """Local embedding provider using sentence-transformers."""
 
+import asyncio
+import threading
 from typing import List
 import torch
 from sentence_transformers import SentenceTransformer
@@ -23,6 +25,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
             config: Embedding provider configuration
         """
         self.config = config
+        self._encode_lock = threading.Lock()
         self.model_name = config.model
         self.dimension = config.dimension
         self.batch_size = config.batch_size
@@ -44,14 +47,21 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         test_embedding = self.model.encode("test", convert_to_numpy=True)
         actual_dimension = len(test_embedding)
         if actual_dimension != self.dimension:
-            print(
-                f"Warning: Configured dimension ({self.dimension}) "
-                f"doesn't match model dimension ({actual_dimension}). "
-                f"Using model dimension."
+            raise ValueError(
+                f"Model {self.model_name} produces {actual_dimension} dimensions; configured {self.dimension}. "
+                "Use a matching model configuration and schema or explicitly migrate and re-embed."
             )
-            self.dimension = actual_dimension
 
         print(f"Embedding model loaded successfully. Dimension: {self.dimension}")
+
+    def _encode(self, *args, **kwargs):
+        with self._encode_lock:
+            return self.model.encode(*args, **kwargs)
+
+    async def close(self):
+        self.model = None
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
 
     async def embed_text(self, text: str) -> List[float]:
         """Generate embedding for a single text.
@@ -63,7 +73,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
             Embedding vector as list of floats
         """
         # sentence-transformers encode is synchronous, but we wrap in async
-        embedding = self.model.encode(
+        embedding = await asyncio.to_thread(self._encode,
             text,
             convert_to_numpy=True,
             normalize_embeddings=self.normalize,
@@ -86,7 +96,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
             return []
 
         # sentence-transformers handles batching internally
-        embeddings = self.model.encode(
+        embeddings = await asyncio.to_thread(self._encode,
             texts,
             batch_size=self.batch_size,
             convert_to_numpy=True,
@@ -111,19 +121,6 @@ class LocalEmbeddingProvider(EmbeddingProvider):
             Model name string
         """
         return self.model_name
-
-    def get_cost(self, num_tokens: int) -> float:
-        """Calculate cost for embedding generation.
-
-        Local embeddings are free.
-
-        Args:
-            num_tokens: Number of tokens processed (ignored)
-
-        Returns:
-            0.0 (local embeddings have no cost)
-        """
-        return 0.0
 
     async def __aenter__(self):
         """Async context manager entry."""

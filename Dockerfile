@@ -28,7 +28,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 # Create cache directory for sentence-transformers models
-RUN mkdir -p .cache
+ENV HF_HOME=/app/.cache/huggingface
+RUN mkdir -p .cache/huggingface
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && \

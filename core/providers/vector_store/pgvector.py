@@ -75,7 +75,7 @@ class PgVectorStore(VectorStore):
     async def insert_chunks(self, chunks: List[Chunk]) -> int:
         """Insert multiple chunks.
 
-        Uses ON CONFLICT to handle duplicates (same content_hash and profile_id).
+        Uses ON CONFLICT to handle duplicates (same content_hash).
 
         Args:
             chunks: List of chunks to insert
@@ -100,16 +100,15 @@ class PgVectorStore(VectorStore):
                         chunk.content_hash,
                         vector_str,
                         json.dumps(chunk.metadata) if chunk.metadata else "{}",
-                        chunk.metadata.get("profile_id") if chunk.metadata else None,
                     )
                 )
 
             # Batch insert with ON CONFLICT
             query = """
                 INSERT INTO embeddings (
-                    id, content, content_hash, content_vector, metadata, profile_id
-                ) VALUES ($1, $2, $3, $4::vector, $5::jsonb, $6)
-                ON CONFLICT (content_hash, profile_id) DO UPDATE SET
+                    id, content, content_hash, content_vector, metadata
+                ) VALUES ($1, $2, $3, $4::vector, $5::jsonb)
+                ON CONFLICT (content_hash) DO UPDATE SET
                     content = EXCLUDED.content,
                     content_vector = EXCLUDED.content_vector,
                     metadata = EXCLUDED.metadata,
@@ -141,7 +140,7 @@ class PgVectorStore(VectorStore):
         vector_str = "[" + ",".join(map(str, query_vector)) + "]"
 
         # Build filter clause
-        filter_clause = self._build_filter_clause(filter_dict)
+        filter_clause, filter_args = self._build_filter_clause(filter_dict, 2)
 
         query = f"""
             SELECT
@@ -149,7 +148,8 @@ class PgVectorStore(VectorStore):
                 content,
                 content_hash,
                 content_vector,
-                metadata,
+                metadata || jsonb_build_object('avg_feedback_score', avg_feedback_score,
+                    'num_feedback', num_feedback, 'retrieval_count', retrieval_count) AS metadata,
                 1 - (content_vector <=> $1::vector) AS score
             FROM embeddings
             {filter_clause}
@@ -158,7 +158,7 @@ class PgVectorStore(VectorStore):
         """
 
         async with self.db_pool.acquire() as conn:
-            rows = await conn.fetch(query, vector_str, top_k)
+            rows = await conn.fetch(query, vector_str, top_k, *filter_args)
 
             results = []
             for rank, row in enumerate(rows, start=1):
@@ -193,7 +193,7 @@ class PgVectorStore(VectorStore):
             List of search results ordered by relevance
         """
         # Build filter clause
-        filter_clause = self._build_filter_clause(filter_dict)
+        filter_clause, filter_args = self._build_filter_clause(filter_dict, 2)
 
         query = f"""
             SELECT
@@ -201,20 +201,21 @@ class PgVectorStore(VectorStore):
                 content,
                 content_hash,
                 content_vector,
-                metadata,
+                metadata || jsonb_build_object('avg_feedback_score', avg_feedback_score,
+                    'num_feedback', num_feedback, 'retrieval_count', retrieval_count) AS metadata,
                 ts_rank(content_tsvector, query) AS score
-            FROM embeddings, to_tsquery('english', $1) AS query
+            FROM embeddings, plainto_tsquery('english', $1) AS query
             WHERE content_tsvector @@ query
             {filter_clause.replace('WHERE', 'AND')}
             ORDER BY score DESC
             LIMIT $2
         """
 
-        # Convert query text to tsquery format (replace spaces with &)
-        tsquery = " & ".join(query_text.split())
+        # Let PostgreSQL parse natural-language text safely.
+        tsquery = query_text
 
         async with self.db_pool.acquire() as conn:
-            rows = await conn.fetch(query, tsquery, top_k)
+            rows = await conn.fetch(query, tsquery, top_k, *filter_args)
 
             results = []
             for rank, row in enumerate(rows, start=1):
@@ -259,11 +260,11 @@ class PgVectorStore(VectorStore):
         # Convert query vector to pgvector format
         vector_str = "[" + ",".join(map(str, query_vector)) + "]"
 
-        # Convert query text to tsquery format
-        tsquery = " & ".join(query_text.split())
+        # Let PostgreSQL parse natural-language text safely.
+        tsquery = query_text
 
         # Build filter clause
-        filter_clause = self._build_filter_clause(filter_dict)
+        filter_clause, filter_args = self._build_filter_clause(filter_dict, 4)
 
         # RRF constant (typical value is 60)
         rrf_k = 60
@@ -276,7 +277,8 @@ class PgVectorStore(VectorStore):
                     content,
                     content_hash,
                     content_vector,
-                    metadata,
+                    metadata || jsonb_build_object('avg_feedback_score', avg_feedback_score,
+                    'num_feedback', num_feedback, 'retrieval_count', retrieval_count) AS metadata,
                     1 - (content_vector <=> $1::vector) AS vector_score,
                     ROW_NUMBER() OVER (ORDER BY content_vector <=> $1::vector) AS vector_rank
                 FROM embeddings
@@ -290,10 +292,11 @@ class PgVectorStore(VectorStore):
                     content,
                     content_hash,
                     content_vector,
-                    metadata,
+                    metadata || jsonb_build_object('avg_feedback_score', avg_feedback_score,
+                    'num_feedback', num_feedback, 'retrieval_count', retrieval_count) AS metadata,
                     ts_rank(content_tsvector, query) AS keyword_score,
                     ROW_NUMBER() OVER (ORDER BY ts_rank(content_tsvector, query) DESC) AS keyword_rank
-                FROM embeddings, to_tsquery('english', $2) AS query
+                FROM embeddings, plainto_tsquery('english', $2) AS query
                 WHERE content_tsvector @@ query
                 {filter_clause.replace('WHERE', 'AND')}
                 LIMIT 50
@@ -318,7 +321,7 @@ class PgVectorStore(VectorStore):
         """
 
         async with self.db_pool.acquire() as conn:
-            rows = await conn.fetch(query, vector_str, tsquery, rrf_k, top_k)
+            rows = await conn.fetch(query, vector_str, tsquery, rrf_k, top_k, *filter_args)
 
             results = []
             for rank, row in enumerate(rows, start=1):
@@ -402,11 +405,11 @@ class PgVectorStore(VectorStore):
         Returns:
             Number of chunks deleted
         """
-        filter_clause = self._build_filter_clause(filter_dict)
+        filter_clause, filter_args = self._build_filter_clause(filter_dict)
         query = f"DELETE FROM embeddings {filter_clause} RETURNING id"
 
         async with self.db_pool.acquire() as conn:
-            rows = await conn.fetch(query)
+            rows = await conn.fetch(query, *filter_args)
             return len(rows)
 
     async def count(self, filter_dict: Optional[Dict[str, Any]] = None) -> int:
@@ -418,38 +421,31 @@ class PgVectorStore(VectorStore):
         Returns:
             Number of chunks
         """
-        filter_clause = self._build_filter_clause(filter_dict)
+        filter_clause, filter_args = self._build_filter_clause(filter_dict)
         query = f"SELECT COUNT(*) FROM embeddings {filter_clause}"
 
         async with self.db_pool.acquire() as conn:
-            return await conn.fetchval(query)
+            return await conn.fetchval(query, *filter_args)
 
-    def _build_filter_clause(self, filter_dict: Optional[Dict[str, Any]]) -> str:
-        """Build SQL WHERE clause from filter dictionary.
-
-        Args:
-            filter_dict: Metadata filters
-
-        Returns:
-            SQL WHERE clause string
-        """
-        if not filter_dict:
-            return ""
-
-        conditions = []
-        for key, value in filter_dict.items():
-            if isinstance(value, str):
-                conditions.append(f"metadata->>'{key}' = '{value}'")
-            elif isinstance(value, (int, float)):
-                conditions.append(f"(metadata->>'{key}')::numeric = {value}")
+    def _build_filter_clause(self, filter_dict: Optional[Dict[str, Any]], offset: int = 0):
+        """Return SQL and parameters; never interpolate metadata keys or values."""
+        conditions, args = [], []
+        for key, value in (filter_dict or {}).items():
+            args.append(key)
+            key_param = f"${offset + len(args)}::text"
+            value_param = f"${offset + len(args) + 1}"
+            if isinstance(value, list):
+                args.append([str(v) for v in value])
+                conditions.append(f"metadata->>{key_param} = ANY({value_param}::text[])")
             elif isinstance(value, bool):
-                conditions.append(f"(metadata->>'{key}')::boolean = {str(value).lower()}")
-            elif isinstance(value, list):
-                # For array membership (e.g., source_type IN ['documentation', 'wiki'])
-                values_str = "', '".join(map(str, value))
-                conditions.append(f"metadata->>'{key}' IN ('{values_str}')")
-
-        if not conditions:
-            return ""
-
-        return "WHERE " + " AND ".join(conditions)
+                args.append(value)
+                conditions.append(f"(metadata->>{key_param})::boolean = {value_param}::boolean")
+            elif isinstance(value, (int, float)):
+                args.append(value)
+                conditions.append(f"(metadata->>{key_param})::numeric = {value_param}::numeric")
+            elif isinstance(value, str):
+                args.append(value)
+                conditions.append(f"metadata->>{key_param} = {value_param}::text")
+            else:
+                raise ValueError(f"Unsupported metadata filter value for {key}")
+        return ("WHERE " + " AND ".join(conditions) if conditions else "", args)
