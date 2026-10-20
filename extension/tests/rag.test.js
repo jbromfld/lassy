@@ -59,3 +59,13 @@ test('direct HTTP request contract, failure and AbortSignal propagation', async 
     await assert.rejects(callRagDirect('http://test/query', 'question', controller.signal), { name: 'AbortError' });
   } finally { global.fetch = original; }
 });
+
+// Shared with the Python API producer test; keep consumer compatibility explicit.
+test('accepts the shared Lassy retrieval response contract', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, '../../contracts/retrieval-response.json'), 'utf8'));
+  const response = validateRagResponse(fixture);
+  assert.equal(response.query_id, fixture.query_id);
+  assert.deepEqual(response.chunks, fixture.chunks);
+});

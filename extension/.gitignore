@@ -16,3 +16,5 @@ coverage/
 *.tar.gz
 *.tgz
 *.vsix
+# Bazel output symlinks
+bazel-*

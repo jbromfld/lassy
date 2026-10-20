@@ -4,12 +4,12 @@ import threading
 
 
 class LocalReranker:
-    def __init__(self, model: str, device: str):
+    def __init__(self, model: str, device: str, revision: str | None = None):
         from sentence_transformers import CrossEncoder
         import torch
         if device == 'cuda' and not torch.cuda.is_available():
             device = 'cpu'
-        self.model = CrossEncoder(model, device=device)
+        self.model = CrossEncoder(model, device=device, **({"revision": revision} if revision else {}))
         self._lock = threading.Lock()
 
     def _score(self, pairs):

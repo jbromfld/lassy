@@ -4,7 +4,7 @@ Minimal VS Code extension that adds an `@knowledge` chat participant.
 
 ## Build a VSIX for testing
 
-Run from this repository:
+Run from the `extension/` directory:
 
 ```bash
 npm run build
@@ -12,9 +12,8 @@ npm run build
 
 Or run `./build.sh` directly, from any directory. The script installs dependencies
 if the local compiler or packager is missing, runs the tests, and packages
-`build/kbsearch-extension-<version>.vsix`. It then uninstalls the existing extension
-if installed and installs the new VSIX. After dependency changes, run `npm ci`
-before rebuilding. Node.js, npm, and the VS Code `code` command must be installed.
+`build/kbsearch-extension-<version>.vsix`. Install it explicitly with `./install.sh` after reviewing the build. After dependency changes, run `npm ci`
+before rebuilding. Node.js 20.20.2 and npm are required for packaging. The VS Code `code` command is required only for installation.
 
 Reload the VS Code window after installing or replacing the extension.
 
@@ -47,7 +46,8 @@ to an address reachable from that host. Start the retrieval service separately.
    npm run compile
    ```
 
-3. Press `F5` in VS Code to launch an Extension Development Host.
+3. Open the Lassy repository root (or this `extension/` folder) in VS Code and
+   press `F5` to launch an Extension Development Host.
 
 4. Open Chat in the dev host and type `@knowledge` followed by your question.
 
@@ -90,3 +90,13 @@ In `mcp` mode, the extension keeps the existing JSON-RPC flow:
 - `initialize`
 - `notifications/initialized`
 - `tools/call` for `kbsearch.toolName`
+
+## Bazel pilot
+
+From the Lassy repository root with Bazel 9.2.0, run
+`bazel test //extension:direct_test` and `bazel build //extension:vsix`.
+The output is `bazel-bin/extension/kbsearch-extension.vsix`; installation remains explicit.
+Bazel uses a declared Node 20.20.2 toolchain and a pnpm lock generated from
+`package-lock.json`. After npm dependency changes, regenerate it with pnpm 10.22.0
+`pnpm import`. Shared setup is documented in
+`../../local-agent-environment/README.md`.

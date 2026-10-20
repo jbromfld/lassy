@@ -1,0 +1,35 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
+load("@lassy_pypi//:requirements.bzl", "all_requirements")
+
+package(default_visibility = ["//visibility:public"])
+exports_files(["requirements.txt"])
+
+py_library(
+    name = "service",
+    srcs = glob(["api/**/*.py", "config/**/*.py", "core/**/*.py"]) + ["cli.py", "evaluate.py"],
+    deps = all_requirements,
+)
+py_binary(
+    name = "server",
+    srcs = ["bazel/service_main.py"],
+    main = "bazel/service_main.py",
+    legacy_create_init = 0,
+    deps = [":service"],
+)
+py_test(
+    name = "service_test",
+    srcs = glob(["tests/*.py"]),
+    main = "tests/bazel_runner.py",
+    legacy_create_init = 0,
+    size = "medium",
+    data = glob(["db/*.sql"]) + ["//contracts:retrieval-response.json"],
+    env = {
+        "POSTGRES_USER": "test",
+        "POSTGRES_PASSWORD": "test",
+        "DEBUG": "false",
+        "HF_HUB_OFFLINE": "1",
+    },
+    deps = [":service"],
+)
+filegroup(name = "build", srcs = [":server", "//extension:vsix"])
+test_suite(name = "test", tests = [":service_test", "//extension:direct_test"])

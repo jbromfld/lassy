@@ -6,7 +6,8 @@
   "publisher": "local",
   "repository": {
     "type": "git",
-    "url": "file:///Users/jbromfield/workspace/kbsearch-extension"
+    "url": "https://github.com/jbromfld/lassy.git",
+    "directory": "extension"
   },
   "license": "UNLICENSED",
   "engines": {

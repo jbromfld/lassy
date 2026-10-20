@@ -1,0 +1,27 @@
+{
+  "query_id": "00000000-0000-0000-0000-000000000001",
+  "feedback_available": true,
+  "chunks": [
+    {
+      "chunk_id": "00000000-0000-0000-0000-000000000002",
+      "citation": "[1]",
+      "content": "Lassy retrieves evidence; the client supplies answer generation.",
+      "title": "Retrieval guide",
+      "url": "https://example.org/guide",
+      "score": 0.5,
+      "rerank_score": null,
+      "section": "section 1",
+      "collection": "guides",
+      "document_id": "retrieval",
+      "revision": "fixture-v1",
+      "content_type": "text",
+      "published_at": null,
+      "last_modified": null
+    }
+  ],
+  "metrics": {
+    "latency_ms": 0.0,
+    "latency_rerank_ms": 0.0,
+    "chunks_retrieved": 1
+  }
+}

@@ -1,0 +1,7 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+exports_files(["retrieval-response.json"], visibility = ["//visibility:public"])
+js_library(
+    name = "retrieval_response",
+    srcs = ["retrieval-response.json"],
+    visibility = ["//extension:__pkg__"],
+)

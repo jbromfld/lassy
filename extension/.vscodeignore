@@ -13,3 +13,13 @@ package-lock.json
 tsconfig.json
 dist/**/*.map
 *.vsix
+
+.bazel*
+BUILD.bazel
+MODULE.bazel*
+bazel/**
+bazel-*/**
+pnpm-*.yaml
+install.sh
+.nvmrc
+HISTORY.md

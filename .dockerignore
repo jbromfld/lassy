@@ -3,6 +3,8 @@
 !.dockerignore
 !Dockerfile
 !requirements.txt
+!pyproject.toml
+!uv.lock
 !cli.py
 !api/
 !api/**
