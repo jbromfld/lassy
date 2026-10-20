@@ -1,0 +1,37 @@
+load("@aspect_rules_js//js:defs.bzl", "js_binary", "js_run_binary", "js_test")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+load("@npm//extension:typescript/package_json.bzl", tsc = "bin")
+
+load("//extension:bazel/paths.bzl", "ROOT")
+
+package(default_visibility = ["//visibility:public"])
+exports_files([".nvmrc", "pnpm-lock.yaml", "pnpm-workspace.yaml"])
+npm_link_all_packages(name = "node_modules")
+tsc.tsc_binary(name = "tsc")
+js_run_binary(
+    name = "compile",
+    tool = ":tsc",
+    chdir = ROOT,
+    srcs = glob(["src/*.ts"]) + ["tsconfig.json", ":node_modules/@types/node", ":node_modules/@types/vscode"],
+    args = ["--project", "tsconfig.json", "--outDir", "dist"],
+    out_dirs = ["dist"],
+)
+js_test(
+    name = "direct_test",
+    size = "small",
+    entry_point = "tests/bazel_runner.cjs",
+    data = [":compile", "//contracts:retrieval_response"] + glob(["tests/*.test.js"]),
+)
+js_binary(
+    name = "packager",
+    entry_point = "bazel/package.cjs",
+    data = [":node_modules/@vscode/vsce"],
+)
+js_run_binary(
+    name = "vsix",
+    tool = ":packager",
+    chdir = ROOT,
+    srcs = [":compile", "package.json", "README.md"],
+    args = ["kbsearch-extension.vsix"],
+    outs = ["kbsearch-extension.vsix"],
+)

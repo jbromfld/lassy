@@ -47,6 +47,7 @@ class Settings(BaseSettings):
         default="sentence-transformers/all-mpnet-base-v2",
         alias="LOCAL_EMBEDDING_MODEL",
     )
+    local_embedding_revision: str | None = Field(default=None, alias="LOCAL_EMBEDDING_REVISION")
     local_embedding_dimension: int = Field(default=768, alias="LOCAL_EMBEDDING_DIMENSION")
     local_embedding_batch_size: int = Field(default=32, alias="LOCAL_EMBEDDING_BATCH_SIZE")
     local_embedding_device: str = Field(default="cpu", alias="LOCAL_EMBEDDING_DEVICE")
@@ -69,6 +70,7 @@ class Settings(BaseSettings):
 
     enable_reranking: bool = Field(default=False, alias="ENABLE_RERANKING")
     rerank_model: str = Field(default="cross-encoder/ms-marco-MiniLM-L-6-v2", alias="RERANK_MODEL")
+    rerank_revision: str | None = Field(default=None, alias="RERANK_REVISION")
     rerank_top_k: int = Field(default=10, alias="RERANK_TOP_K")
 
     # ============================================
@@ -87,7 +89,7 @@ class Settings(BaseSettings):
     def embedding_config(self) -> EmbeddingProviderConfig:
         return EmbeddingProviderConfig(
             provider="local", model=self.local_embedding_model,
-            dimension=self.local_embedding_dimension, batch_size=self.local_embedding_batch_size,
+            revision=self.local_embedding_revision, dimension=self.local_embedding_dimension, batch_size=self.local_embedding_batch_size,
             device=self.local_embedding_device,
         )
 
@@ -104,7 +106,7 @@ class Settings(BaseSettings):
         return RetrievalConfig(
             top_k=self.retrieval_top_k, hybrid_search=self.hybrid_search_enabled,
             relevance_threshold=self.relevance_threshold,
-            enable_reranking=self.enable_reranking, rerank_model=self.rerank_model,
+            enable_reranking=self.enable_reranking, rerank_model=self.rerank_model, rerank_revision=self.rerank_revision,
             rerank_top_k=self.rerank_top_k, recency_boost_enabled=self.recency_boost_enabled,
             quality_boost_enabled=self.quality_boost_enabled,
             popularity_boost_enabled=self.popularity_boost_enabled,

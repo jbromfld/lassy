@@ -1,0 +1,82 @@
+{
+  "name": "kbsearch-extension",
+  "displayName": "KB Search Mention",
+  "description": "Adds an @knowledge chat participant for internal knowledge queries.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jbromfld/lassy.git",
+    "directory": "extension"
+  },
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.97.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onChatParticipant:kbsearch-extension.knowledge"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "kbsearch-extension.knowledge",
+        "name": "knowledge",
+        "fullName": "Internal Knowledge",
+        "description": "Ask questions using internal knowledge context.",
+        "isSticky": false
+      }
+    ],
+    "configuration": {
+      "title": "KB Search",
+      "properties": {
+        "kbsearch.connectionMode": {
+          "type": "string",
+          "enum": [
+            "mcp",
+            "direct"
+          ],
+          "default": "direct",
+          "description": "Connection strategy for @knowledge. Use 'mcp' for MCP tool calls or 'direct' to query the RAG service HTTP API directly."
+        },
+        "kbsearch.mcpUrl": {
+          "type": "string",
+          "default": "http://localhost:8080/mcp",
+          "description": "MCP endpoint used by @knowledge."
+        },
+        "kbsearch.toolName": {
+          "type": "string",
+          "default": "search_knowledge_base",
+          "description": "MCP tool name invoked by @knowledge."
+        },
+        "kbsearch.ragUrl": {
+          "type": "string",
+          "default": "http://localhost:8000/query",
+          "description": "Direct RAG query endpoint used when connectionMode is 'direct'."
+        },
+        "kbsearch.includeSources": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include a SOURCES block in direct RAG responses before summarization."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "bash ./build.sh",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package --allow-missing-repository",
+    "test": "npm run compile && node --test tests/*.test.js"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "2.24.0",
+    "@types/node": "^20.16.5",
+    "@types/vscode": "^1.97.0",
+    "typescript": "^5.6.2"
+  }
+}

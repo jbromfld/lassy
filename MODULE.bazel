@@ -1,0 +1,49 @@
+module(name = "lassy", version = "0.1.0")
+
+bazel_dep(name = "rules_python", version = "2.4.2")
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.single_version_platform_override(
+    python_version = "3.13.16",
+    platform = "aarch64-apple-darwin",
+    urls = ["https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.13.16%2B20261013-aarch64-apple-darwin-install_only_stripped.tar.gz"],
+    sha256 = "16a5332fb0dcb77f163fc8f8cbccd95be1644cc53e68e5d2a79f50afd6680a0e",
+    strip_prefix = "python",
+)
+python.single_version_platform_override(
+    python_version = "3.13.16",
+    platform = "aarch64-unknown-linux-gnu",
+    urls = ["https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.13.16%2B20261013-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz"],
+    sha256 = "69a30ed26198178732c37b8de0b6b5191479fbacfe526954da776befe38f18e7",
+    strip_prefix = "python",
+)
+python.override(minor_mapping = {"3.13": "3.13.16"})
+python.defaults(python_version = "3.13")
+python.toolchain(python_version = "3.13")
+use_repo(python, "python_3_13", "pythons_hub")
+register_toolchains("@pythons_hub//:all")
+
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "lassy_pypi",
+    python_version = "3.13",
+    requirements_lock = "//:requirements.txt",
+)
+use_repo(pip, "lassy_pypi")
+
+bazel_dep(name = "aspect_rules_js", version = "3.5.1")
+bazel_dep(name = "rules_nodejs", version = "6.7.6")
+node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
+node.toolchain(node_version_from_nvmrc = "//extension:.nvmrc")
+use_repo(node, "nodejs_toolchains")
+register_toolchains("@nodejs_toolchains//:all")
+pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")
+pnpm.pnpm(
+    name = "pnpm",
+    pnpm_version = "10.22.0",
+    pnpm_version_integrity = "sha512-vwSe/plbKPUn/StBrgR0zikYb37cs79UUIe9Yfu+uyv3U2LRMH/aCcLSiOHkmXh6wS1Py2F6l0cYpgUfLu50HA==",
+)
+use_repo(pnpm, "pnpm")
+npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")
+npm.npm_translate_lock(name = "npm", pnpm_lock = "//extension:pnpm-lock.yaml", data = ["//extension:pnpm-workspace.yaml"])
+use_repo(npm, "npm")

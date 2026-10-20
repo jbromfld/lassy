@@ -56,6 +56,7 @@ class EmbeddingProviderConfig(BaseModel):
 
     provider: EmbeddingProvider
     model: str
+    revision: Optional[str] = None
     dimension: int = 768
     batch_size: int = 32
     normalize: bool = True
@@ -109,6 +110,7 @@ class RetrievalConfig(BaseModel):
     source_filter: Optional[List[str]] = None
 
     enable_reranking: bool = False
+    rerank_revision: Optional[str] = None
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     rerank_top_k: int = Field(default=10, ge=1, le=100)
 

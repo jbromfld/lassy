@@ -39,7 +39,7 @@ class ProviderFactory:
         if not config.enable_reranking:
             return None
         from core.retrieval.reranker import LocalReranker
-        key = (config.rerank_model, device)
+        key = (config.rerank_model, device, config.rerank_revision)
         async with self._embedding_lock:
             if key not in self._rerankers:
                 self._rerankers[key] = await asyncio.to_thread(LocalReranker, *key)

@@ -83,3 +83,11 @@ docker-compose-local.yml
 .cursor/
 node_modules/
 *.visx
+# Bazel output symlinks
+bazel-*
+
+# Share root extension debugging configuration.
+!/.vscode/
+/.vscode/*
+!/.vscode/launch.json
+!/.vscode/tasks.json

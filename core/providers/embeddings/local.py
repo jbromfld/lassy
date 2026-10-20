@@ -27,6 +27,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         self.config = config
         self._encode_lock = threading.Lock()
         self.model_name = config.model
+        self.revision = config.revision
         self.dimension = config.dimension
         self.batch_size = config.batch_size
         self.normalize = config.normalize
@@ -41,7 +42,8 @@ class LocalEmbeddingProvider(EmbeddingProvider):
 
         # Load model
         print(f"Loading embedding model: {self.model_name} on {self.device}...")
-        self.model = SentenceTransformer(self.model_name, device=self.device)
+        self.model = SentenceTransformer(self.model_name, device=self.device,
+                                         **({"revision": config.revision} if config.revision else {}))
 
         # Verify dimension
         test_embedding = self.model.encode("test", convert_to_numpy=True)
@@ -120,7 +122,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         Returns:
             Model name string
         """
-        return self.model_name
+        return f"{self.model_name}@{self.revision}" if self.revision else self.model_name
 
     async def __aenter__(self):
         """Async context manager entry."""

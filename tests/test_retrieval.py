@@ -55,6 +55,22 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             retriever.return_value.rerank_time_ms = 0.0
             return await self.client.post('/query', json={'query': 'How does it work?', **body})
 
+    async def test_shared_extension_response_contract(self):
+        import json
+        from pathlib import Path
+        from uuid import UUID
+        expected = json.loads((Path(__file__).resolve().parents[1] / 'contracts/retrieval-response.json').read_text())
+        chunk = expected['chunks'][0]
+        metadata = {key: chunk[key] for key in ('title', 'collection', 'document_id',
+                    'revision', 'content_type', 'published_at', 'last_modified')}
+        metadata.update(source_url=chunk['url'], section_ref=chunk['section'])
+        result = SimpleNamespace(chunk_id=chunk['chunk_id'], content=chunk['content'],
+            boosted_score=chunk['score'], rerank_score=chunk['rerank_score'], metadata=metadata)
+        with patch('uuid.uuid4', return_value=UUID(expected['query_id'])), patch('time.time', return_value=42.0):
+            response = await self.query([result])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), expected)
+
     async def test_default_and_explicit_retrieval_preserve_chunks(self):
         ids = [str(uuid4()) for _ in range(3)]
         results = [SimpleNamespace(chunk_id=id, content=f'content {i}', boosted_score=.5,
@@ -170,6 +186,15 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await main.check_readiness()
             conn.fetchval = AsyncMock(side_effect=[1, *([True]*5), False, 'vector(768)'])
             await main.check_readiness()
+
+    async def test_pinned_embedding_revision_is_loaded_and_identifies_documents(self):
+        from core.providers.embeddings.local import LocalEmbeddingProvider
+        config = settings().embedding_config.model_copy(update={"revision": "abc123"})
+        with patch('core.providers.embeddings.local.SentenceTransformer') as model:
+            model.return_value.encode.return_value = [0.] * 768
+            provider = LocalEmbeddingProvider(config)
+            model.assert_called_once_with(config.model, device=config.device, revision='abc123')
+            self.assertEqual(provider.get_model_name(), config.model + '@abc123')
 
     async def test_model_dimension_mismatch_and_embedding_worker(self):
         import threading
