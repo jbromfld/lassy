@@ -110,3 +110,5 @@ for settings, MCP mode, and remote Extension Hosts.
 - [API and retrieval](docs/api.md): CLI, query/feedback contracts, configuration, reranking, and compatibility.
 - [Shared documents and evaluation](docs/documents.md): additive migration, upserts, collections, reindexing, and retrieval judgments.
 - [Development and builds](docs/development.md): tests, runtime versions, dependency locks, Bazel targets, and repository boundaries.
+
+OCI release publishing and GitOps deployment are documented in [image releases](docs/releases.md).
