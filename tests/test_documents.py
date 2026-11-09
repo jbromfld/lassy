@@ -1,4 +1,5 @@
 import unittest
+from core.providers.base import EmbeddingProvider
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -11,7 +12,8 @@ from core.pipeline.ingestion_pipeline import IngestionPipeline, IngestionRequest
 
 def embedder():
     return Mock(embed_batch=AsyncMock(side_effect=lambda texts: [[1., 0.] for _ in texts]),
-                get_model_name=lambda: 'test-model', get_dimension=lambda: 2)
+                get_model_name=lambda: 'test-model', get_dimension=lambda: 2,
+                split_text=lambda text: [text], chunking_identity=lambda: {}, prepare_document=EmbeddingProvider.prepare_document.__get__(object()))
 
 
 class DocumentTests(unittest.IsolatedAsyncioTestCase):

@@ -2,6 +2,8 @@
 
 import time
 import hashlib
+import logging
+from core.concurrency import BusyError
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -10,7 +12,7 @@ from uuid import UUID, uuid4
 from config.models import ChunkingConfig
 from core.ingestion.chunker import DocumentChunker
 from core.pipeline.documents import DocumentRequest, upsert_document
-from core.ingestion.scraper import DocumentScraper
+from core.ingestion.scraper import DocumentScraper, DownloadError
 from core.providers.base import EmbeddingProvider, VectorStore
 
 
@@ -151,7 +153,10 @@ class IngestionPipeline:
                 processing_time_ms=(time.time() - start_time) * 1000,
             )
 
-        except Exception as e:
+        except (BusyError, DownloadError, ValueError):
+            raise
+        except Exception:
+            logging.getLogger(__name__).exception("Document ingestion failed")
             processing_time = (time.time() - start_time) * 1000
             return IngestionResult(
                 job_id=job_id,
@@ -160,7 +165,7 @@ class IngestionPipeline:
                 chunks_created=0,
                 embeddings_generated=0,
                 processing_time_ms=processing_time,
-                error_message=str(e),
+                error_message="Document ingestion failed; check the service logs",
             )
 
     async def close(self):

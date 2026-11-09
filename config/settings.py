@@ -2,7 +2,7 @@
 
 from functools import cached_property, lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .models import ChunkingConfig, EmbeddingProviderConfig, RetrievalConfig, VectorStoreConfig
@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     local_embedding_dimension: int = Field(default=768, alias="LOCAL_EMBEDDING_DIMENSION")
     local_embedding_batch_size: int = Field(default=32, alias="LOCAL_EMBEDDING_BATCH_SIZE")
     local_embedding_device: str = Field(default="cpu", alias="LOCAL_EMBEDDING_DEVICE")
+    inference_queue_timeout_seconds: float = Field(default=30, gt=0, le=300, alias="INFERENCE_QUEUE_TIMEOUT_SECONDS")
+    inference_max_pending: int = Field(default=16, ge=1, le=256, alias="INFERENCE_MAX_PENDING")
 
     # ============================================
     # Chunking
@@ -81,6 +83,14 @@ class Settings(BaseSettings):
     quality_boost_enabled: bool = Field(default=True, alias="QUALITY_BOOST_ENABLED")
     popularity_boost_enabled: bool = Field(default=True, alias="POPULARITY_BOOST_ENABLED")
 
+    @model_validator(mode='after')
+    def validate_processing(self):
+        # Validate derived configuration at startup rather than first ingestion.
+        self.chunking_config
+        self.embedding_config
+        self.retrieval_config
+        return self
+
     @cached_property
     def vector_store_config(self) -> VectorStoreConfig:
         return VectorStoreConfig(provider="postgresql", dimension=self.pgvector_dimension)
@@ -91,6 +101,8 @@ class Settings(BaseSettings):
             provider="local", model=self.local_embedding_model,
             revision=self.local_embedding_revision, dimension=self.local_embedding_dimension, batch_size=self.local_embedding_batch_size,
             device=self.local_embedding_device,
+            queue_timeout_seconds=self.inference_queue_timeout_seconds,
+            max_pending=self.inference_max_pending,
         )
 
     @cached_property
@@ -110,6 +122,8 @@ class Settings(BaseSettings):
             rerank_top_k=self.rerank_top_k, recency_boost_enabled=self.recency_boost_enabled,
             quality_boost_enabled=self.quality_boost_enabled,
             popularity_boost_enabled=self.popularity_boost_enabled,
+            queue_timeout_seconds=self.inference_queue_timeout_seconds,
+            max_pending=self.inference_max_pending,
         )
 
 @lru_cache()

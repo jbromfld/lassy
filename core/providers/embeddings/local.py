@@ -1,12 +1,11 @@
 """Local embedding provider using sentence-transformers."""
 
-import asyncio
-import threading
 from typing import List
 import torch
 from sentence_transformers import SentenceTransformer
 
 from config.models import EmbeddingProviderConfig
+from core.concurrency import InferenceGate
 
 from ..base import EmbeddingProvider
 
@@ -25,7 +24,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
             config: Embedding provider configuration
         """
         self.config = config
-        self._encode_lock = threading.Lock()
+        self.gate = InferenceGate(config.queue_timeout_seconds, config.max_pending)
         self.model_name = config.model
         self.revision = config.revision
         self.dimension = config.dimension
@@ -57,10 +56,10 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         print(f"Embedding model loaded successfully. Dimension: {self.dimension}")
 
     def _encode(self, *args, **kwargs):
-        with self._encode_lock:
-            return self.model.encode(*args, **kwargs)
+        return self.model.encode(*args, **kwargs)
 
     async def close(self):
+        await self.gate.close()
         self.model = None
         if self.device == "cuda":
             torch.cuda.empty_cache()
@@ -75,7 +74,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
             Embedding vector as list of floats
         """
         # sentence-transformers encode is synchronous, but we wrap in async
-        embedding = await asyncio.to_thread(self._encode,
+        embedding = await self.gate.run(self._encode,
             text,
             convert_to_numpy=True,
             normalize_embeddings=self.normalize,
@@ -97,16 +96,55 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         if not texts:
             return []
 
-        # sentence-transformers handles batching internally
-        embeddings = await asyncio.to_thread(self._encode,
-            texts,
-            batch_size=self.batch_size,
-            convert_to_numpy=True,
-            normalize_embeddings=self.normalize,
-            show_progress_bar=False,
-        )
+        result = []
+        for start in range(0, len(texts), self.batch_size):
+            embeddings = await self.gate.run(self._encode,
+                texts[start:start+self.batch_size], batch_size=self.batch_size,
+                convert_to_numpy=True, normalize_embeddings=self.normalize,
+                show_progress_bar=False)
+            result.extend(emb.tolist() for emb in embeddings)
+        return result
 
-        return [emb.tolist() for emb in embeddings]
+    def chunking_identity(self):
+        return {'max_sequence_length': self.model.max_seq_length, 'normalize': self.normalize}
+
+    async def prepare_document(self, function, *args):
+        # Hugging Face tokenizers can mutate truncation state during encode.
+        # Share admission with inference rather than tokenizing concurrently.
+        return await self.gate.run(function, *args)
+
+    def split_text(self, text):
+        """Retain the original characters, splitting only when tokens exceed the model limit."""
+        limit = self.model.max_seq_length
+
+        def fits(value):
+            return len(self.model.tokenizer.encode(value, add_special_tokens=True,
+                       truncation=False, verbose=False)) <= limit
+
+        pieces = []
+        while text:
+            if fits(text):
+                pieces.append(text)
+                break
+            low, high = 0, len(text)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if fits(text[:middle]):
+                    low = middle
+                else:
+                    high = middle - 1
+            if not low:
+                raise ValueError('Embedding token limit cannot fit a single character')
+            # Prefer a word boundary, then verify the actual emitted piece.
+            boundary = text.rfind(' ', 0, low + 1)
+            end = boundary if boundary > low // 2 else low
+            while end and not fits(text[:end]):
+                end -= 1
+            if not end:
+                raise ValueError('Embedding token limit cannot fit source text')
+            pieces.append(text[:end])
+            text = text[end:]
+        return pieces
 
     def get_dimension(self) -> int:
         """Get embedding dimension.

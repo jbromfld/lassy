@@ -30,6 +30,12 @@ RAG_TEST_POSTGRES=1 POSTGRES_HOST=127.0.0.1 DEBUG=false python -m unittest disco
 RAG_TEST_POSTGRES=1 RAG_TEST_MODEL=1 POSTGRES_HOST=127.0.0.1 DEBUG=false python -m unittest discover -s tests -v
 ```
 
+The Python suite includes chunk coverage/token bounds, model queue cancellation
+and fairness, bounded downloads/redirects/crawls, input limits, metadata reuse,
+publication recency and document ordering. Opt-in PostgreSQL tests also verify
+metadata-only feedback preservation, the additive migration and bounded history
+pruning. Live model tests remain optional and require cached model files.
+
 Run `npm test` in `extension/` for compilation and direct-mode tests. Complete an F5 `@knowledge` check to verify the installed VS Code/chat model environment.
 
 ## Standardized environment

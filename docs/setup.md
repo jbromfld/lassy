@@ -34,6 +34,10 @@ psql -h localhost -p 5432 -U YOUR_USER -d YOUR_DATABASE -v ON_ERROR_STOP=1 -1 \
   -f db/cleanup.sql -f db/init.sql
 ```
 
+For an existing retrieval-only installation, apply `db/002_documents.sql` and
+`db/003_practical.sql` as described in the [document upgrade guide](documents.md);
+do not use cleanup/reset for this upgrade.
+
 Startup never resets or migrates a database automatically. There are no database configuration profiles or seed records. A different embedding dimension requires a matching schema and environment settings, followed by re-ingestion.
 
 ## Run

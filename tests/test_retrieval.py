@@ -10,6 +10,7 @@ import httpx
 from api import main
 from config import Settings
 from core.metrics import MetricsTracker
+from core.concurrency import InferenceGate
 from core.providers.factory import ProviderFactory
 from core.providers.vector_store.pgvector import PgVectorStore
 
@@ -105,6 +106,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.factory.get_embedding_provider.return_value = embed
         embed.get_model_name.return_value = 'test'
         embed.get_dimension.return_value = 768
+        from core.providers.base import EmbeddingProvider
+        embed.prepare_document = EmbeddingProvider.prepare_document.__get__(embed)
+        embed.chunking_identity.return_value = {}
+        embed.split_text.side_effect = lambda text: [text]
         embed.embed_batch = AsyncMock(return_value=[[1.] + [0.] * 767])
         response = await self.client.put('/documents/rss/123', json={'content':'Short summary.', 'title':'VLM'})
         self.assertEqual(response.status_code, 200, response.text)
@@ -133,7 +138,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         schema = main.app.openapi()
         for name in ('IngestRequest', 'QueryRequestAPI'):
             self.assertNotIn('profile', schema['components']['schemas'][name]['properties'])
-        self.settings.retrieval_top_k = 2
+        self.settings = Settings(_env_file=None, POSTGRES_USER="test", POSTGRES_PASSWORD="test", RETRIEVAL_TOP_K=2)
+        main.app_state.settings = self.settings
         with patch('api.main.Retriever') as retriever:
             retriever.return_value.retrieve = AsyncMock(return_value=[])
             retriever.return_value.rerank_time_ms = 0.0
@@ -143,6 +149,50 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(retriever.return_value.retrieve.await_args.kwargs['top_k'], 2)
             await self.client.post('/query', json={'query': 'question', 'top_k': 3})
             self.assertEqual(retriever.return_value.retrieve.await_args.kwargs['top_k'], 3)
+
+
+    async def test_resource_limits_reject_before_work(self):
+        for body in ({'top_k':101},{'query':'x'*4001},{'filters':{'collection':{'nested':'bad'}}},
+                     {'filters':{'collection':[1]}},{'filters':{'x'*201:'a'}}):
+            self.assertEqual((await self.query([],**body)).status_code,422)
+        for body in ({'content':'x'*2_000_001}, {'content':'x','metadata':{'large':'x'*32768}},
+                     {'content':'x','sections':[{'ref':'p','text':'x'*1_000_001}]*2}):
+            response=await self.client.put('/documents/c/1',json=body)
+            self.assertEqual(response.status_code,422,response.text[:200])
+            self.assertLess(len(response.content),1000)
+        async def large_body():
+            for _ in range(3): yield b' '*3_000_000
+        response=await self.client.post('/query',content=large_body(),headers={'content-type':'application/json'})
+        self.assertEqual(response.status_code,413,response.text)
+        for method in ('put','delete'):
+            response=await getattr(self.client,method)('/documents/%20/1',**({'json':{'content':'x'}} if method=='put' else {}))
+            self.assertEqual(response.status_code,422)
+
+    async def test_page_download_failure_is_distinct_from_validation(self):
+        from core.ingestion.scraper import DownloadError
+        with patch('api.main.IngestionPipeline') as pipeline:
+            pipeline.return_value.ingest=AsyncMock(side_effect=DownloadError('Page unavailable; retry later'))
+            pipeline.return_value.close=AsyncMock()
+            response=await self.client.post('/ingest',json={'url':'https://example.org'})
+            self.assertEqual(response.status_code,502)
+            pipeline.return_value.close.assert_awaited_once()
+
+    async def test_busy_feedback_and_unexpected_errors_are_readable(self):
+        import asyncpg
+        from core.concurrency import BusyError
+        with patch('api.main.Retriever') as retriever:
+            retriever.return_value.retrieve=AsyncMock(side_effect=BusyError('Retry shortly'))
+            response=await self.client.post('/query',json={'query':'question'})
+            self.assertEqual(response.status_code,503)
+            self.assertEqual(response.headers['retry-after'],'30')
+            retriever.return_value.retrieve=AsyncMock(side_effect=RuntimeError('private database text'))
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app,raise_app_exceptions=False),base_url='http://test') as client:
+                response=await client.post('/query',json={'query':'question'})
+            self.assertEqual(response.status_code,500)
+            self.assertNotIn('private database text',response.text)
+        self.tracker.save_feedback=AsyncMock(side_effect=asyncpg.ForeignKeyViolationError('unknown query'))
+        response=await self.client.post('/feedback',json={'query_id':str(uuid4()),'score':8})
+        self.assertEqual(response.status_code,404)
 
 
 
@@ -186,6 +236,14 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await main.check_readiness()
             conn.fetchval = AsyncMock(side_effect=[1, *([True]*5), False, 'vector(768)'])
             await main.check_readiness()
+            import asyncpg
+            conn.fetchval = AsyncMock(side_effect=[1, *([True]*5), False, 'vector(768)'])
+            async def missing_column(sql):
+                if 'embedding_revision' in sql:
+                    raise asyncpg.UndefinedColumnError('missing fingerprint')
+            conn.execute.side_effect = missing_column
+            with self.assertRaisesRegex(RuntimeError, '003_practical'):
+                await main.check_readiness()
 
     async def test_pinned_embedding_revision_is_loaded_and_identifies_documents(self):
         from core.providers.embeddings.local import LocalEmbeddingProvider
@@ -205,7 +263,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, 'configured 768'):
                 LocalEmbeddingProvider(config)
         provider = LocalEmbeddingProvider.__new__(LocalEmbeddingProvider)
-        provider._encode_lock = threading.Lock()
+        provider.gate = InferenceGate()
         provider.normalize = True
         event_loop_thread = threading.get_ident()
         def encode(*args, **kwargs):
@@ -241,8 +299,8 @@ class TrackingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("O'Reilly", sql)
         self.assertNotIn("author'", sql)
         self.assertIn('$5::text', sql)
-        self.assertIn('::boolean', sql)
-        self.assertEqual(args, ["author'", "O'Reilly", 'tags', ["x' OR true --"], 'active', True, 'count', 3])
+        self.assertIn('::jsonb', sql)
+        self.assertEqual(args, ["author'", '"O\'Reilly"', 'tags', ['"x\' OR true --"'], 'active', 'true', 'count', '3'])
 
 
 
@@ -279,7 +337,7 @@ class RerankingTests(unittest.IsolatedAsyncioTestCase):
         import threading
         from core.retrieval.reranker import LocalReranker
         scorer = LocalReranker.__new__(LocalReranker)
-        scorer._lock = threading.Lock()
+        scorer.gate = InferenceGate()
         event_loop_thread = threading.get_ident()
         def predict(pairs, **kwargs):
             self.assertNotEqual(threading.get_ident(), event_loop_thread)

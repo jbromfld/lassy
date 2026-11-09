@@ -22,7 +22,9 @@ psql -h localhost -p 5432 -U YOUR_USER -d YOUR_DATABASE -v ON_ERROR_STOP=1 -1 -f
 
 The initializing role needs permission to enable pgvector. Existing installations
 should follow the [migration instructions](docs/documents.md), not reinitialize.
-The default model and schema both use 768-dimensional embeddings.
+The default model and schema both use 768-dimensional embeddings. Existing
+installations must apply `db/003_practical.sql` before starting this version; see
+[upgrade and backfill instructions](docs/documents.md).
 
 ### Start with Bazel
 
@@ -102,6 +104,11 @@ question about ingested content. The extension does not start the API.
 For development without reinstalling, open this repository in VS Code and press
 F5 after `npm ci --prefix extension`. See the [extension guide](extension/README.md)
 for settings, MCP mode, and remote Extension Hosts.
+
+Interactive queries and indexing share bounded model admission; busy requests
+return an actionable 503. Indexing yields between batches. Metadata-only source
+changes reuse embeddings, and publication dates affect recency ranking. Run one
+API process/replica when accepting writes so per-document updates stay ordered.
 
 ## Reference
 

@@ -7,6 +7,8 @@ from uuid import UUID
 from asyncpg import Pool
 
 from config.models import VectorStoreConfig
+from core.concurrency import document_operation
+from core.validation import validate_filters
 
 from ..base import Chunk, SearchResult, VectorStore
 
@@ -118,242 +120,81 @@ class PgVectorStore(VectorStore):
             await conn.executemany(query, records)
             return len(chunks)
 
-    async def vector_search(
-        self,
-        query_vector: List[float],
-        top_k: int = 5,
-        filter_dict: Optional[Dict[str, Any]] = None,
-        **kwargs,
-    ) -> List[SearchResult]:
-        """Perform vector similarity search using cosine distance.
+    @staticmethod
+    def _chunk(row):
+        metadata = row['metadata']
+        vector = row.get('content_vector')
+        return Chunk(id=row['id'], content=row['content'], content_hash=row['content_hash'],
+                     metadata=json.loads(metadata) if isinstance(metadata, str) else metadata,
+                     vector=[float(v) for v in json.loads(vector)] if isinstance(vector, str) else vector)
 
-        Args:
-            query_vector: Query embedding vector
-            top_k: Number of results to return
-            filter_dict: Optional metadata filters
-            **kwargs: Additional parameters
-
-        Returns:
-            List of search results ordered by similarity
-        """
-        # Convert query vector to pgvector format
-        vector_str = "[" + ",".join(map(str, query_vector)) + "]"
-
-        # Build filter clause
-        filter_clause, filter_args = self._build_filter_clause(filter_dict, 2)
-
-        query = f"""
-            SELECT
-                id,
-                content,
-                content_hash,
-                content_vector,
-                metadata || jsonb_build_object('avg_feedback_score', avg_feedback_score,
-                    'num_feedback', num_feedback, 'retrieval_count', retrieval_count) AS metadata,
-                1 - (content_vector <=> $1::vector) AS score
-            FROM embeddings
-            {filter_clause}
-            ORDER BY content_vector <=> $1::vector
-            LIMIT $2
-        """
-
+    async def _search(self, query, *args):
         async with self.db_pool.acquire() as conn:
-            rows = await conn.fetch(query, vector_str, top_k, *filter_args)
+            rows = await conn.fetch(query, *args)
+        return [SearchResult(self._chunk(row), float(row['score']), rank)
+                for rank, row in enumerate(rows, 1)]
 
-            results = []
-            for rank, row in enumerate(rows, start=1):
-                chunk = Chunk(
-                    id=row["id"],
-                    content=row["content"],
-                    content_hash=row["content_hash"],
-                    vector=list(row["content_vector"]) if row["content_vector"] else None,
-                    metadata=row["metadata"] if isinstance(row["metadata"], dict) else json.loads(row["metadata"]) if row["metadata"] else {},
-                    score=float(row["score"]),
-                )
-                results.append(SearchResult(chunk=chunk, score=float(row["score"]), rank=rank))
+    _projection = """id, content, content_hash,
+        metadata || jsonb_build_object('avg_feedback_score', avg_feedback_score,
+            'num_feedback', num_feedback, 'retrieval_count', retrieval_count) AS metadata"""
 
-            return results
+    async def vector_search(self, query_vector, top_k=5, filter_dict=None, **kwargs):
+        clause, args = self._build_filter_clause(filter_dict, 2)
+        return await self._search(f"""SELECT {self._projection},
+            1 - (content_vector <=> $1::vector) AS score FROM embeddings {clause}
+            ORDER BY content_vector <=> $1::vector LIMIT $2""",
+            json.dumps(query_vector), top_k, *args)
 
-    async def keyword_search(
-        self,
-        query_text: str,
-        top_k: int = 5,
-        filter_dict: Optional[Dict[str, Any]] = None,
-        **kwargs,
-    ) -> List[SearchResult]:
-        """Perform keyword search using PostgreSQL full-text search (tsvector).
-
-        Args:
-            query_text: Query text
-            top_k: Number of results to return
-            filter_dict: Optional metadata filters
-            **kwargs: Additional parameters
-
-        Returns:
-            List of search results ordered by relevance
-        """
-        # Build filter clause
-        filter_clause, filter_args = self._build_filter_clause(filter_dict, 2)
-
-        query = f"""
-            SELECT
-                id,
-                content,
-                content_hash,
-                content_vector,
-                metadata || jsonb_build_object('avg_feedback_score', avg_feedback_score,
-                    'num_feedback', num_feedback, 'retrieval_count', retrieval_count) AS metadata,
-                ts_rank(content_tsvector, query) AS score
+    async def keyword_search(self, query_text, top_k=5, filter_dict=None, **kwargs):
+        clause, args = self._build_filter_clause(filter_dict, 2)
+        return await self._search(f"""SELECT {self._projection},
+            ts_rank(content_tsvector, query) AS score
             FROM embeddings, plainto_tsquery('english', $1) AS query
-            WHERE content_tsvector @@ query
-            {filter_clause.replace('WHERE', 'AND')}
-            ORDER BY score DESC
-            LIMIT $2
-        """
+            WHERE content_tsvector @@ query {clause.replace('WHERE', 'AND')}
+            ORDER BY score DESC, id LIMIT $2""", query_text, top_k, *args)
 
-        # Let PostgreSQL parse natural-language text safely.
-        tsquery = query_text
-
-        async with self.db_pool.acquire() as conn:
-            rows = await conn.fetch(query, tsquery, top_k, *filter_args)
-
-            results = []
-            for rank, row in enumerate(rows, start=1):
-                chunk = Chunk(
-                    id=row["id"],
-                    content=row["content"],
-                    content_hash=row["content_hash"],
-                    vector=list(row["content_vector"]) if row["content_vector"] else None,
-                    metadata=row["metadata"] if isinstance(row["metadata"], dict) else json.loads(row["metadata"]) if row["metadata"] else {},
-                    score=float(row["score"]),
-                )
-                results.append(SearchResult(chunk=chunk, score=float(row["score"]), rank=rank))
-
-            return results
-
-    async def hybrid_search(
-        self,
-        query_text: str,
-        query_vector: List[float],
-        top_k: int = 5,
-        vector_weight: float = 0.7,
-        keyword_weight: float = 0.3,
-        filter_dict: Optional[Dict[str, Any]] = None,
-        **kwargs,
-    ) -> List[SearchResult]:
-        """Perform hybrid search using Reciprocal Rank Fusion (RRF).
-
-        Combines vector search and keyword search results using RRF algorithm.
-
-        Args:
-            query_text: Query text for keyword search
-            query_vector: Query embedding for vector search
-            top_k: Number of results to return
-            vector_weight: Weight for vector search (not used in RRF, but kept for interface compatibility)
-            keyword_weight: Weight for keyword search (not used in RRF, but kept for interface compatibility)
-            filter_dict: Optional metadata filters
-            **kwargs: Additional parameters
-
-        Returns:
-            List of search results ranked by RRF score
-        """
-        # Convert query vector to pgvector format
-        vector_str = "[" + ",".join(map(str, query_vector)) + "]"
-
-        # Let PostgreSQL parse natural-language text safely.
-        tsquery = query_text
-
-        # Build filter clause
-        filter_clause, filter_args = self._build_filter_clause(filter_dict, 4)
-
-        # RRF constant (typical value is 60)
-        rrf_k = 60
-
-        # Use CTE (Common Table Expressions) for RRF
-        query = f"""
+    async def hybrid_search(self, query_text, query_vector, top_k=5, vector_weight=.7,
+                            keyword_weight=.3, filter_dict=None, **kwargs):
+        # Fixed equal-weight RRF; branch limits grow with the requested candidate count.
+        clause, args = self._build_filter_clause(filter_dict, 5)
+        return await self._search(f"""
             WITH vector_results AS (
-                SELECT
-                    id,
-                    content,
-                    content_hash,
-                    content_vector,
-                    metadata || jsonb_build_object('avg_feedback_score', avg_feedback_score,
-                    'num_feedback', num_feedback, 'retrieval_count', retrieval_count) AS metadata,
-                    1 - (content_vector <=> $1::vector) AS vector_score,
-                    ROW_NUMBER() OVER (ORDER BY content_vector <=> $1::vector) AS vector_rank
-                FROM embeddings
-                {filter_clause}
-                ORDER BY content_vector <=> $1::vector
-                LIMIT 50
-            ),
-            keyword_results AS (
-                SELECT
-                    id,
-                    content,
-                    content_hash,
-                    content_vector,
-                    metadata || jsonb_build_object('avg_feedback_score', avg_feedback_score,
-                    'num_feedback', num_feedback, 'retrieval_count', retrieval_count) AS metadata,
-                    ts_rank(content_tsvector, query) AS keyword_score,
-                    ROW_NUMBER() OVER (ORDER BY ts_rank(content_tsvector, query) DESC) AS keyword_rank
+                SELECT id, ROW_NUMBER() OVER (ORDER BY content_vector <=> $1::vector) AS rank
+                FROM embeddings {clause}
+                ORDER BY content_vector <=> $1::vector LIMIT $5
+            ), keyword_results AS (
+                SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank(content_tsvector, query) DESC, id) AS rank
                 FROM embeddings, plainto_tsquery('english', $2) AS query
-                WHERE content_tsvector @@ query
-                {filter_clause.replace('WHERE', 'AND')}
-                LIMIT 50
+                WHERE content_tsvector @@ query {clause.replace('WHERE', 'AND')}
+                ORDER BY ts_rank(content_tsvector, query) DESC, id LIMIT $5
+            ), fused AS (
+                SELECT COALESCE(v.id, k.id) AS id,
+                    COALESCE(1.0 / ($3 + v.rank), 0) + COALESCE(1.0 / ($3 + k.rank), 0) AS score
+                FROM vector_results v FULL OUTER JOIN keyword_results k ON v.id=k.id
+                ORDER BY score DESC, id LIMIT $4
             )
-            SELECT
-                COALESCE(v.id, k.id) AS id,
-                COALESCE(v.content, k.content) AS content,
-                COALESCE(v.content_hash, k.content_hash) AS content_hash,
-                COALESCE(v.content_vector, k.content_vector) AS content_vector,
-                COALESCE(v.metadata, k.metadata) AS metadata,
-                COALESCE(v.vector_score, 0) AS vector_score,
-                COALESCE(k.keyword_score, 0) AS keyword_score,
-                -- RRF score: 1/(k + rank)
-                (
-                    COALESCE(1.0 / ($3 + v.vector_rank), 0) +
-                    COALESCE(1.0 / ($3 + k.keyword_rank), 0)
-                ) AS rrf_score
-            FROM vector_results v
-            FULL OUTER JOIN keyword_results k ON v.id = k.id
-            ORDER BY rrf_score DESC
-            LIMIT $4
-        """
-
-        async with self.db_pool.acquire() as conn:
-            rows = await conn.fetch(query, vector_str, tsquery, rrf_k, top_k, *filter_args)
-
-            results = []
-            for rank, row in enumerate(rows, start=1):
-                chunk = Chunk(
-                    id=row["id"],
-                    content=row["content"],
-                    content_hash=row["content_hash"],
-                    vector=list(row["content_vector"]) if row["content_vector"] else None,
-                    metadata=row["metadata"] if isinstance(row["metadata"], dict) else json.loads(row["metadata"]) if row["metadata"] else {},
-                    score=float(row["rrf_score"]),
-                )
-                results.append(SearchResult(chunk=chunk, score=float(row["rrf_score"]), rank=rank))
-
-            return results
+            SELECT e.id, content, content_hash,
+                metadata || jsonb_build_object('avg_feedback_score', avg_feedback_score,
+                    'num_feedback', num_feedback, 'retrieval_count', retrieval_count) AS metadata,
+                score FROM fused JOIN embeddings e ON e.id=fused.id ORDER BY score DESC, e.id
+            """, json.dumps(query_vector), query_text, 60, top_k,
+            min(200, max(50, top_k)), *args)
 
     async def get_document_status(self, collection, document_id):
         async with self.db_pool.acquire() as conn:
-            row = await conn.fetchrow("""SELECT revision,
+            row = await conn.fetchrow("""SELECT revision, embedding_revision,
                 (SELECT count(*) FROM embeddings WHERE metadata->>'collection'=$1
                  AND metadata->>'document_id'=$2) AS chunks
                 FROM documents WHERE collection=$1 AND document_id=$2""", collection, document_id)
             return dict(row) if row else None
 
-    async def replace_document(self, collection, document_id, revision, chunks):
-        """Publish all chunks in one transaction, serialized with deletes/upserts."""
+    async def replace_document(self, collection, document_id, revision, chunks, *, embedding_revision=None):
+        """Publish all prepared chunks in a short transaction."""
         async with self.db_pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-                                   json.dumps([collection, document_id]))
+                await self._publication_lock(conn, collection, document_id)
                 current = await conn.fetchval(
-                    "SELECT revision FROM documents WHERE collection=$1 AND document_id=$2",
-                    collection, document_id)
+                    'SELECT revision FROM documents WHERE collection=$1 AND document_id=$2', collection, document_id)
                 if current == revision:
                     return False
                 await conn.execute("DELETE FROM embeddings WHERE metadata->>'collection'=$1 AND metadata->>'document_id'=$2",
@@ -361,22 +202,43 @@ class PgVectorStore(VectorStore):
                 await conn.executemany("""INSERT INTO embeddings
                     (id, content, content_hash, content_vector, metadata)
                     VALUES ($1,$2,$3,$4::vector,$5::jsonb)""", [
-                    (c.id, c.content, c.content_hash, "[" + ",".join(map(str, c.vector)) + "]",
-                     json.dumps(c.metadata)) for c in chunks])
-                await conn.execute("""INSERT INTO documents(collection,document_id,revision)
-                    VALUES ($1,$2,$3) ON CONFLICT(collection,document_id) DO UPDATE
-                    SET revision=EXCLUDED.revision,indexed_at=NOW()""", collection, document_id, revision)
+                    (c.id, c.content, c.content_hash, json.dumps(c.vector), json.dumps(c.metadata)) for c in chunks])
+                await conn.execute("""INSERT INTO documents(collection,document_id,revision,embedding_revision)
+                    VALUES ($1,$2,$3,$4) ON CONFLICT(collection,document_id) DO UPDATE
+                    SET revision=EXCLUDED.revision,embedding_revision=EXCLUDED.embedding_revision,indexed_at=NOW()""",
+                    collection, document_id, revision, embedding_revision)
+        return True
+
+    @staticmethod
+    async def _publication_lock(conn, collection, document_id):
+        await conn.execute('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+                           json.dumps([collection, document_id]))
+
+    async def update_document_metadata(self, collection, document_id, revision, embedding_revision, metadata):
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                await self._publication_lock(conn, collection, document_id)
+                current = await conn.fetchval('SELECT embedding_revision FROM documents WHERE collection=$1 AND document_id=$2',
+                                              collection, document_id)
+                if current != embedding_revision:
+                    return False
+                await conn.execute("""UPDATE embeddings SET metadata=$3::jsonb || jsonb_build_object(
+                    'section_ref',metadata->'section_ref','chunk_index',metadata->'chunk_index',
+                    'total_chunks',metadata->'total_chunks'), updated_at=NOW()
+                    WHERE metadata->>'collection'=$1 AND metadata->>'document_id'=$2""",
+                    collection, document_id, json.dumps(metadata))
+                await conn.execute('UPDATE documents SET revision=$3,indexed_at=NOW() WHERE collection=$1 AND document_id=$2',
+                                   collection, document_id, revision)
         return True
 
     async def delete_document(self, collection, document_id):
-        async with self.db_pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-                                   json.dumps([collection, document_id]))
-                await conn.execute("DELETE FROM embeddings WHERE metadata->>'collection'=$1 AND metadata->>'document_id'=$2",
-                                   collection, document_id)
-                await conn.execute("DELETE FROM documents WHERE collection=$1 AND document_id=$2",
-                                   collection, document_id)
+        async with document_operation(collection, document_id):
+            async with self.db_pool.acquire() as conn:
+                async with conn.transaction():
+                    await self._publication_lock(conn, collection, document_id)
+                    await conn.execute("DELETE FROM embeddings WHERE metadata->>'collection'=$1 AND metadata->>'document_id'=$2",
+                                       collection, document_id)
+                    await conn.execute('DELETE FROM documents WHERE collection=$1 AND document_id=$2', collection, document_id)
 
     async def get_chunk(self, chunk_id: UUID) -> Optional[Chunk]:
         """Get chunk by ID.
@@ -399,13 +261,7 @@ class PgVectorStore(VectorStore):
             if not row:
                 return None
 
-            return Chunk(
-                id=row["id"],
-                content=row["content"],
-                content_hash=row["content_hash"],
-                vector=list(row["content_vector"]) if row["content_vector"] else None,
-                metadata=row["metadata"],
-            )
+            return self._chunk(row)
 
     async def update_chunk_metadata(
         self, chunk_id: UUID, metadata: Dict[str, Any]
@@ -468,25 +324,17 @@ class PgVectorStore(VectorStore):
         async with self.db_pool.acquire() as conn:
             return await conn.fetchval(query, *filter_args)
 
-    def _build_filter_clause(self, filter_dict: Optional[Dict[str, Any]], offset: int = 0):
-        """Return SQL and parameters; never interpolate metadata keys or values."""
+    def _build_filter_clause(self, filter_dict, offset=0):
+        """Bind typed JSON values; incompatible stored types simply do not match."""
         conditions, args = [], []
-        for key, value in (filter_dict or {}).items():
+        for key, value in validate_filters(filter_dict or {}).items():
             args.append(key)
             key_param = f"${offset + len(args)}::text"
             value_param = f"${offset + len(args) + 1}"
             if isinstance(value, list):
-                args.append([str(v) for v in value])
-                conditions.append(f"metadata->>{key_param} = ANY({value_param}::text[])")
-            elif isinstance(value, bool):
-                args.append(value)
-                conditions.append(f"(metadata->>{key_param})::boolean = {value_param}::boolean")
-            elif isinstance(value, (int, float)):
-                args.append(value)
-                conditions.append(f"(metadata->>{key_param})::numeric = {value_param}::numeric")
-            elif isinstance(value, str):
-                args.append(value)
-                conditions.append(f"metadata->>{key_param} = {value_param}::text")
+                args.append([json.dumps(v) for v in value])
+                conditions.append(f"metadata->{key_param} = ANY({value_param}::jsonb[])")
             else:
-                raise ValueError(f"Unsupported metadata filter value for {key}")
+                args.append(json.dumps(value, allow_nan=False))
+                conditions.append(f"metadata @> jsonb_build_object({key_param}, {value_param}::jsonb)")
         return ("WHERE " + " AND ".join(conditions) if conditions else "", args)

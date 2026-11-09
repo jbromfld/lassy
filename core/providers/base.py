@@ -1,6 +1,7 @@
 """Base abstract classes for all providers."""
 
 from abc import ABC, abstractmethod
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from uuid import UUID
@@ -39,6 +40,18 @@ class SearchResult:
 
 class EmbeddingProvider(ABC):
     """Abstract base class for embedding providers."""
+
+    def split_text(self, text: str) -> List[str]:
+        """Further split a word chunk to fit this model's tokenizer."""
+        return [text]
+
+    def chunking_identity(self) -> Dict[str, Any]:
+        """Configuration affecting embeddings beyond model name and dimension."""
+        return {}
+
+    async def prepare_document(self, function, *args):
+        """Prepare chunks off the event loop; providers may bound tokenizer access."""
+        return await asyncio.to_thread(function, *args)
 
     @abstractmethod
     async def embed_text(self, text: str) -> List[float]:
@@ -219,8 +232,15 @@ class VectorStore(ABC):
 
     @abstractmethod
     async def replace_document(self, collection: str, document_id: str, revision: str,
-                               chunks: List[Chunk]) -> bool:
+                               chunks: List[Chunk], *, embedding_revision: str | None = None) -> bool:
         """Atomically replace a document's chunks; return whether it changed."""
+        pass
+
+    @abstractmethod
+    async def update_document_metadata(self, collection: str, document_id: str,
+                                       revision: str, embedding_revision: str,
+                                       metadata: Dict[str, Any]) -> bool:
+        """Update provenance atomically while retaining vectors and chunk statistics."""
         pass
 
     @abstractmethod

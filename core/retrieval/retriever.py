@@ -191,62 +191,22 @@ class Retriever:
     def _calculate_recency_boost(
         self, metadata: Dict[str, Any], now: datetime
     ) -> float:
-        """Calculate recency boost based on last_modified date.
-
-        Boost formula (from METADATA_STRATEGY.md):
-        - < 30 days: 1.5x
-        - 30-90 days: 1.3x
-        - 90-180 days: 1.1x
-        - > 180 days: exp(-age_days / 730.0)
-
-        Args:
-            metadata: Chunk metadata
-            now: Current datetime
-
-        Returns:
-            Recency boost multiplier (>= 1.0)
-        """
+        """Prefer publication time, falling back to modification time; decay toward neutral."""
         if not self.config.recency_boost_enabled:
             return 1.0
-
-        last_modified_str = metadata.get("last_modified")
-        if not last_modified_str:
-            return 1.0  # No boost if no date
-
-        try:
-            # Parse last_modified date
-            if isinstance(last_modified_str, str):
-                # Try ISO format
-                last_modified = datetime.fromisoformat(
-                    last_modified_str.replace("Z", "+00:00")
-                )
-            else:
-                last_modified = last_modified_str
-
-            if last_modified.tzinfo is None:
-                last_modified = last_modified.replace(tzinfo=timezone.utc)
-
-            # Calculate age in days
-            age_days = (now - last_modified).days
-
-            # Apply boost based on age
-            if age_days < 0:
-                # Future date, use 1.0
-                return 1.0
-            elif age_days < 30:
-                return 1.5
-            elif age_days < 90:
-                return 1.3
-            elif age_days < 180:
-                return 1.1
-            else:
-                # Exponential decay for older content
-                # Half-life of 730 days (2 years)
-                return max(1.0, math.exp(-age_days / 730.0) * 1.5)
-
-        except Exception:
-            # If date parsing fails, no boost
-            return 1.0
+        for key in ('published_at', 'last_modified'):
+            value = metadata.get(key)
+            if not value:
+                continue
+            try:
+                date = datetime.fromisoformat(value.replace('Z', '+00:00')) if isinstance(value, str) else value
+                if date.tzinfo is None:
+                    date = date.replace(tzinfo=timezone.utc)
+                age = (now - date).total_seconds() / 86400
+                return 1.0 if age < 0 else 1.0 + .5 * math.exp(-age / 180)
+            except (ValueError, TypeError, AttributeError):
+                continue
+        return 1.0
 
     def _calculate_quality_boost(self, metadata: Dict[str, Any]) -> float:
         """Calculate quality boost based on user feedback.
