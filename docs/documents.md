@@ -32,7 +32,9 @@ dimension, normalization, token limit, and chunking configuration.
    These historical migrations precede the new refactor and are for legacy schemas.
 2. Apply additive `db/004_mcp.sql`, transactionally with `ON_ERROR_STOP=1`.
    It creates only index identity metadata; documents, vectors, historical tracking
-   tables, counters, and functions are preserved.
+   tables, counters, and functions are preserved. If an administrator creates the
+   table, grant the existing runtime role SELECT/INSERT/UPDATE/DELETE on
+   `lassy_index_identity`; role/database credentials remain unchanged.
 3. Recover/verify the exact model snapshot used to build the existing vectors.
    Set `LOCAL_EMBEDDING_REVISION` to that immutable commit, preserving the old model
    name, dimensions, device-relevant settings, and chunking configuration. The

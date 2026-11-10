@@ -2,7 +2,7 @@
 
 import logging
 import sys
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from .concurrency import BusyError
 from .documents import DocumentRequest
+from .errors import startup_message
 from .service import open_service
 from .types import QueryRequest
 
@@ -44,17 +45,17 @@ def create_app(service=None):
             application.state.service = service
             yield
         else:
-            try:
-                async with open_service() as runtime:
-                    application.state.service = runtime
-                    yield
-            except Exception:
-                logging.getLogger(__name__).critical(
-                    "Lassy startup failed. Check explicit configuration and index migration; run lassy-models prepare for missing models."
-                )
-                raise RuntimeError(
-                    "Lassy startup failed. Check explicit configuration, index migration, and prepared models."
-                ) from None
+            async with AsyncExitStack() as resources:
+                try:
+                    runtime = await resources.enter_async_context(open_service())
+                except Exception as exc:
+                    message = startup_message(exc)
+                    logging.getLogger(__name__).critical(
+                        "Lassy startup failed: %s", message
+                    )
+                    raise RuntimeError(f"Lassy startup failed: {message}") from None
+                application.state.service = runtime
+                yield
 
     application = FastAPI(
         title="Lassy document retrieval", version="0.2.0", lifespan=lifespan
