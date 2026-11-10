@@ -11,6 +11,7 @@ from mcp.types import ToolAnnotations
 from pydantic import ValidationError
 
 from .concurrency import BusyError
+from .errors import startup_message
 from .service import open_service
 
 
@@ -107,10 +108,8 @@ def main():
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
     try:
         build_server().run(transport="stdio")
-    except Exception:
-        raise SystemExit(
-            "Lassy could not start. Check explicit configuration, schema/index identity, and prepared models (lassy-models prepare); see docs/documents.md."
-        ) from None
+    except Exception as exc:
+        raise SystemExit(f"Lassy could not start: {startup_message(exc)}") from None
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import asyncpg
 
 from .config import load_settings
 from .documents import DocumentRequest, upsert_document
+from .errors import StartupError
 from .models import configure_offline, load_models
 from .retrieval import Retriever
 from .store import PgVectorStore
@@ -43,16 +44,19 @@ def index_identity(settings, embedder):
 async def check_schema(conn, dimension):
     for table in ("embeddings", "documents", "lassy_index_identity"):
         if not await conn.fetchval("SELECT to_regclass($1)", f"public.{table}"):
-            raise RuntimeError(
-                "Missing index schema. Initialize a fresh database or apply the documented additive migrations."
+            raise StartupError(
+                "missing_identity_schema"
+                if table == "lassy_index_identity"
+                else "missing_document_schema"
             )
-    await conn.execute("SELECT embedding_revision FROM documents LIMIT 0")
+    try:
+        await conn.execute("SELECT embedding_revision FROM documents LIMIT 0")
+    except asyncpg.UndefinedColumnError:
+        raise StartupError("missing_embedding_revision") from None
     vector_type = await conn.fetchval("""SELECT format_type(atttypid, atttypmod)
         FROM pg_attribute WHERE attrelid='embeddings'::regclass AND attname='content_vector'""")
     if vector_type != f"vector({dimension})":
-        raise RuntimeError(
-            "Embedding dimension differs from the index; explicitly migrate and reindex."
-        )
+        raise StartupError("dimension_mismatch")
 
 
 class Service:
@@ -83,18 +87,14 @@ class Service:
                 "SELECT identity, legacy_unpinned FROM lassy_index_identity WHERE singleton"
             )
         if row is None:
-            raise RuntimeError(
-                "Existing index identity is unverified. Verify the model snapshot and run lassy-models adopt-index; see the migration guide."
-            )
+            raise StartupError("identity_unverified")
         stored = (
             json.loads(row["identity"])
             if isinstance(row["identity"], str)
             else row["identity"]
         )
         if stored != identity:
-            raise RuntimeError(
-                "Model or chunking identity differs from this index. Use a separate database and explicitly reindex."
-            )
+            raise StartupError("identity_mismatch")
         if row["legacy_unpinned"]:
             self.embedder.identity_name = self.settings.local_embedding_model
 
@@ -204,7 +204,10 @@ async def open_service(settings=None):
         if reranker:
             cleanup.push_async_callback(reranker.close)
         service = Service(settings, pool, embedder, reranker)
-        await service.ready(initialize=True)
+        try:
+            await service.ready(initialize=True)
+        except asyncpg.InsufficientPrivilegeError:
+            raise StartupError("database_permissions") from None
         yield service
 
 

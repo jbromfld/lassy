@@ -57,8 +57,18 @@ The new package requires `documents.embedding_revision` and the additive
 `db/004_mcp.sql` index identity table. A populated older index also needs explicit
 verified model-identity adoption. Follow the [upgrade guide](documents.md), prepare
 the required pinned snapshots in the mounted cache, and verify readiness before
-resuming writers. Startup uses sanitized diagnostics; check configuration/schema
-and cache paths without printing credentials or source content.
+resuming writers. Known startup failures now name the missing migration or the
+required adoption step without exposing credentials or source text. Unknown
+third-party errors retain a generic safe diagnostic.
+
+If weights load and the log names `lassy_index_identity`, model preparation is
+already working: apply `db/004_mcp.sql` and explicitly adopt the verified index.
+The migration's new table also needs SELECT/INSERT/UPDATE/DELETE grants for the
+runtime role when an administrator owns the table. After adoption, restart only
+the failed pod and check rollout readiness and `/health`; no new image is needed
+to resolve the missing schema. Preserve the original unqualified fingerprint with
+`--legacy-unpinned` only when the old revision was omitted and its snapshot has
+been verified. See the upgrade guide before running adoption.
 
 Do not reset the database or rebuild the same image to repair missing schema or
 models. Image publication and Argo promotion remain separate from database/model

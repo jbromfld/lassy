@@ -7,6 +7,8 @@ import os
 import sys
 from contextlib import redirect_stdout
 
+from .errors import StartupError, startup_message
+
 MODEL_IGNORE_PATTERNS = [
     "*.bin",
     "*.pt",
@@ -42,9 +44,7 @@ def offline_snapshot(model, revision):
             ignore_patterns=MODEL_IGNORE_PATTERNS,
         )
     except Exception:
-        raise RuntimeError(
-            "Pinned model is missing. Run lassy-models prepare with this configuration."
-        ) from None
+        raise StartupError("model_missing") from None
 
 
 async def load_models(settings):
@@ -132,10 +132,8 @@ def main():
                 "Verified index identity adopted. No vectors were changed.",
                 file=sys.stderr,
             )
-    except Exception:
-        raise SystemExit(
-            "Model operation failed. Check configuration, model cache, and the index migration guide."
-        ) from None
+    except Exception as exc:
+        raise SystemExit(f"Model operation failed: {startup_message(exc)}") from None
 
 
 if __name__ == "__main__":
