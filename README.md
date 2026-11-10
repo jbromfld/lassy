@@ -1,5 +1,7 @@
 # Lassy
 
+![A digital golden retriever fetching research documents from a glowing library](docs/images/lassy-retriever.png)
+
 Document ingestion and hybrid retrieval backed by PostgreSQL/pgvector, with local
 embeddings and optional reranking. The included VS Code extension adds
 `@knowledge` and uses VS Code’s selected chat model to generate answers from
