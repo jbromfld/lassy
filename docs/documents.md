@@ -62,9 +62,10 @@ Query chunks include `collection`, `document_id`, `revision`, `content_type`,
 `published_at` and the source section reference in `section`.
 
 This update changes chunk boundaries and token-limit handling. Existing vectors
-remain searchable, but backfill source records to benefit from the fixes. For
-Lalaland, run its existing `python -m backend.services.knowledge backfill`, then
-allow scheduled delivery (or run its sync command). The first delivery under the
+remain searchable, but backfill source records to benefit from the fixes. From the
+Lalaland backend runtime, using its database/settings, run
+`python -m backend.services.knowledge backfill`, then allow scheduled delivery
+(or run its sync command). See [native/Compose/Kubernetes commands](../../lalaland/docs/knowledge.md). The first delivery under the
 new pipeline re-embeds each document once; later date/title changes reuse vectors.
 Other clients should resend their original documents. Do not reset the index.
 
@@ -110,6 +111,8 @@ python -m core.metrics.prune --days 90 --limit 1000 --dry-run
 python -m core.metrics.prune --days 90 --limit 1000
 # Compose equivalent:
 docker compose exec lassy python -m core.metrics.prune --days 90 --dry-run
+# Managed Kubernetes equivalent:
+kubectl --context colima -n lassy exec deployment/lassy -- python -m core.metrics.prune --days 90 --dry-run
 ```
 
 Each invocation removes at most `limit` eligible queries and their metrics. Repeat

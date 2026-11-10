@@ -4,7 +4,21 @@
 
 Run commands from the repository root unless stated otherwise.
 
-## Persistent local model cache
+## Choose the cache for your deployment
+
+For Argo-managed Lassy, [local-agent-environment](../../local-agent-environment/docs/gitops.md#laptop-settings)
+maps the configured host cache (default `~/.cache/huggingface`) into the Colima VM
+and then the pod. `MODEL_CACHE_DIR` in a Compose `.env` does not change this mount.
+Use that guide for managed cache preparation and owner-aware restarts; do not
+start/stop a separate Compose instance to update a Kubernetes workload.
+
+The shared model-preparation playbook writes `.local/huggingface` in the
+environment repository. Point clients and the configured deployment mount at the
+cache you actually prepared; it is not automatically copied to the default cache.
+Babar can use the same cache but has a different pinned model. Do not purge a
+shared `hub` directory while other consumers depend on its snapshots.
+
+## Persistent cache for standalone Compose
 
 Compose mounts `./.cache/huggingface` on the Docker host at `/app/.cache/huggingface` in the container and sets `HF_HOME` to that container path. Both the PyTorch embedding model and the optional reranker use this cache. It survives container replacement, image rebuilds, and `docker compose down`, and is excluded from Git and the Docker build context. Rebuilding the image does not update cached models. With a remote Docker daemon, the source directory must exist on that daemon's host.
 
@@ -75,7 +89,8 @@ The online command checks the configured model repositories for updates and down
 
 ### Purge downloaded models
 
-For the default mount, stop the API and remove only the Hub model cache:
+For a dedicated Lassy Compose cache, stop that API and remove its Hub model cache
+only when a purge is necessary:
 
 ```bash
 docker compose stop lassy
@@ -86,7 +101,7 @@ docker compose up -d --force-recreate lassy
 
 For a custom mount, remove `hub` inside your `MODEL_CACHE_DIR` instead. Purging removes model downloads and cached revisions, preserves any Hugging Face token outside `hub`, and leaves PostgreSQL documents/embeddings intact. Download again before starting in offline mode. Purging is not needed for routine updates.
 
-### Migrate the previous Docker volume
+### Older Compose installations with a named volume
 
 Before recreating an existing container that still uses the old `embeddings_cache` volume, copy its downloaded files into the new local directory:
 
