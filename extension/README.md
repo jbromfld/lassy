@@ -2,6 +2,13 @@
 
 Minimal VS Code extension that adds an `@knowledge` chat participant.
 
+For the shared local stack, set `kbsearch.ragUrl` to
+`http://127.0.0.1:8082/query`; the extension's standalone default remains port 8000.
+Direct mode calls Lassy without the optional
+[retrieval MCP adapter](../../local-mcp-server/README.md). Babar's separate memory
+MCP service is not a retrieval backend for this extension. See the
+[stack overview](../../local-agent-environment/README.md) for management links.
+
 ## Build a VSIX for testing
 
 Run from the `extension/` directory:
@@ -37,7 +44,7 @@ to an address reachable from that host. Start the retrieval service separately.
 1. Install dependencies:
 
    ```bash
-   npm install
+   npm ci
    ```
 
 2. Compile:

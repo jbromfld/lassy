@@ -18,7 +18,9 @@ class MetricsTracker:
                     """INSERT INTO queries (query_id, query_text, response, retrieved_chunks)
                        VALUES ($1, $2, $3::jsonb, $4::uuid[])""",
                     query_id, query_text,
-                    json.dumps({'chunks': chunks}, default=str), ids,
+                    json.dumps({'chunks': [{key: c[key] for key in (
+                        'chunk_id', 'citation', 'score', 'collection', 'document_id', 'revision') if key in c}
+                        for c in chunks]}, default=str), ids,
                 )
                 await conn.execute(
                     """INSERT INTO metrics (query_id, latency_retrieval_ms, latency_rerank_ms,
@@ -55,3 +57,23 @@ class MetricsTracker:
             """)
         return {key: (int(value) if key in ('total_queries', 'total_feedback') else float(value) if value is not None else None)
                 for key, value in dict(row).items()}
+
+    async def prune_history(self, days=90, limit=1000, dry_run=False):
+        """Remove one bounded batch of old unrated queries; preserve rated history."""
+        if not 1 <= days <= 36500 or not 1 <= limit <= 10000:
+            raise ValueError('days must be 1–36500 and limit 1–10000')
+        async with self.db_pool.acquire() as conn:
+            async with conn.transaction():
+                rows = await conn.fetch("""SELECT query_id FROM queries q
+                    WHERE created_at < NOW() - make_interval(days => $1)
+                    AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.query_id=q.query_id)
+                    ORDER BY created_at, query_id LIMIT $2 FOR UPDATE OF q""", days, limit)
+                ids = [row['query_id'] for row in rows]
+                if not dry_run and ids:
+                    # Recheck after acquiring row locks: concurrently submitted feedback wins.
+                    ids = await conn.fetchval("""SELECT COALESCE(array_agg(query_id), '{}'::uuid[]) FROM queries q
+                        WHERE query_id=ANY($1::uuid[]) AND NOT EXISTS
+                        (SELECT 1 FROM feedback f WHERE f.query_id=q.query_id)""", ids)
+                    await conn.execute('DELETE FROM metrics WHERE query_id=ANY($1::uuid[])', ids)
+                    await conn.execute('DELETE FROM queries WHERE query_id=ANY($1::uuid[])', ids)
+        return {'eligible': len(ids), 'deleted': 0 if dry_run else len(ids), 'dry_run': dry_run}

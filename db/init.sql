@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS documents (
     collection TEXT NOT NULL,
     document_id TEXT NOT NULL,
     revision TEXT NOT NULL,
+    embedding_revision TEXT,
     indexed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (collection, document_id)
 );

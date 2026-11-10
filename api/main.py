@@ -11,6 +11,7 @@ from uuid import UUID
 from fastapi import FastAPI, HTTPException, Request, Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, field_validator
 
 from config import Settings, get_settings
@@ -19,6 +20,9 @@ from core.pipeline import IngestionPipeline, IngestionRequest
 from core.pipeline.documents import DocumentRequest, upsert_document
 from core.retrieval import Retriever
 from core.providers import ProviderFactory
+from core.concurrency import BusyError
+from core.validation import validate_filters, validate_metadata
+from core.ingestion.scraper import DownloadError
 
 # Setup logging
 logging.basicConfig(
@@ -92,7 +96,7 @@ async def check_readiness(check_model: bool = False):
         await conn.fetchval("SELECT 1")
         for table in ("embeddings", "queries", "metrics", "feedback", "documents"):
             if not await conn.fetchval("SELECT to_regclass($1)", f"public.{table}"):
-                raise RuntimeError(f"Missing table {table}; initialize with db/init.sql; existing installations apply db/002_documents.sql")
+                raise RuntimeError(f"Missing table {table}; initialize with db/init.sql; existing installations apply db/002_documents.sql and db/003_practical.sql")
         try:
             await conn.execute("SELECT latency_rerank_ms FROM metrics LIMIT 0")
         except asyncpg.UndefinedColumnError as exc:
@@ -106,6 +110,10 @@ async def check_readiness(check_model: bool = False):
             SELECT format_type(atttypid, atttypmod) FROM pg_attribute
             WHERE attrelid = 'embeddings'::regclass AND attname = 'content_vector'
         """)
+        try:
+            await conn.execute('SELECT embedding_revision FROM documents LIMIT 0')
+        except asyncpg.UndefinedColumnError as exc:
+            raise RuntimeError('Apply db/003_practical.sql before restarting Lassy') from exc
     settings = app_state.settings
     dimension = settings.embedding_config.dimension
     if vector_type != f"vector({dimension})" or settings.vector_store_config.dimension != dimension:
@@ -126,6 +134,28 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+class BodyLimitMiddleware:
+    """Bound JSON bodies before parsing, including chunked requests."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        size = 0
+
+        async def limited_receive():
+            nonlocal size
+            message = await receive()
+            size += len(message.get('body', b''))
+            if size > 8 * 1024 * 1024:
+                raise HTTPException(413, 'Request body must be at most 8 MiB')
+            return message
+
+        await self.app(scope, limited_receive if scope['type'] == 'http' else receive, send)
+
+
+app.add_middleware(BodyLimitMiddleware)
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -144,9 +174,9 @@ app.add_middleware(
 class IngestRequest(BaseModel):
     """Ingest endpoint request."""
 
-    url: Optional[str] = Field(None, description="URL to scrape")
-    content: Optional[str] = Field(None, description="Direct content")
-    title: Optional[str] = Field(None, description="Document title")
+    url: Optional[str] = Field(None, max_length=4000, description="Public HTTP(S) URL to scrape")
+    content: Optional[str] = Field(None, max_length=2_000_000, description="Direct content")
+    title: Optional[str] = Field(None, max_length=2000, description="Document title")
     metadata: Optional[Dict[str, Any]] = Field(
         None, description="Additional metadata")
     # Crawling parameters
@@ -159,13 +189,32 @@ class IngestRequest(BaseModel):
     exclude_patterns: Optional[List[str]] = Field(
         None, description="URL patterns to exclude (glob syntax)")
 
+    @field_validator('metadata')
+    @classmethod
+    def bounded_metadata(cls, value):
+        return validate_metadata(value) if value is not None else value
+
+    @field_validator('url', 'content')
+    @classmethod
+    def nonblank_input(cls, value):
+        if value is not None and not value.strip():
+            raise ValueError('url and content must not be blank')
+        return value
+
+    @field_validator('url_patterns', 'exclude_patterns')
+    @classmethod
+    def bounded_patterns(cls, value):
+        if value is not None and (len(value) > 50 or any(len(p) > 1000 for p in value)):
+            raise ValueError('At most 50 patterns of 1000 characters are supported')
+        return value
+
 
 class QueryRequestAPI(BaseModel):
     """Query endpoint request."""
 
-    query: str = Field(..., min_length=1, description="Question to search")
+    query: str = Field(..., min_length=1, max_length=4000, description="Question to search")
     top_k: Optional[int] = Field(
-        None, gt=0, description="Number of results to retrieve")
+        None, gt=0, le=100, description="Number of results to retrieve")
     filters: Optional[Dict[str, Any]] = Field(
         None, description="Metadata filters")
     retrieve_only: Literal[True] = Field(
@@ -179,13 +228,18 @@ class QueryRequestAPI(BaseModel):
             raise ValueError("query must not be blank")
         return value.strip()
 
+    @field_validator('filters')
+    @classmethod
+    def bounded_filters(cls, value):
+        return validate_filters(value) if value is not None else value
+
 
 class FeedbackRequest(BaseModel):
     """Feedback endpoint request."""
 
     query_id: UUID = Field(..., description="Query UUID")
     score: int = Field(..., ge=0, le=10, description="Feedback score (0-10)")
-    comment: Optional[str] = Field(None, description="Optional comment")
+    comment: Optional[str] = Field(None, max_length=4000, description="Optional comment")
 
 
 # ============================================
@@ -227,9 +281,9 @@ async def ingest(request: IngestRequest):
 
     Returns job statistics.
     """
-    if not request.url and not request.content:
+    if bool(request.url) == bool(request.content):
         raise HTTPException(
-            status_code=400, detail="Must provide either url or content"
+            status_code=422, detail="Provide exactly one of url or content"
         )
 
     settings = app_state.settings
@@ -282,8 +336,8 @@ async def ingest(request: IngestRequest):
 
 @app.put("/documents/{collection}/{document_id}")
 async def put_document(request: DocumentRequest,
-                       collection: str = Path(min_length=1, max_length=200),
-                       document_id: str = Path(min_length=1, max_length=500)):
+                       collection: str = Path(min_length=1, max_length=200, pattern=r'^\S(?:.*\S)?$'),
+                       document_id: str = Path(min_length=1, max_length=500, pattern=r'^\S(?:.*\S)?$')):
     settings = app_state.settings
     store = app_state.provider_factory.create_vector_store(settings.vector_store_config)
     embedder = await app_state.provider_factory.get_embedding_provider(settings.embedding_config)
@@ -295,7 +349,8 @@ async def put_document(request: DocumentRequest,
 
 
 @app.delete("/documents/{collection}/{document_id}")
-async def delete_document(collection: str, document_id: str):
+async def delete_document(collection: str = Path(min_length=1, max_length=200, pattern=r'^\S(?:.*\S)?$'),
+                          document_id: str = Path(min_length=1, max_length=500, pattern=r'^\S(?:.*\S)?$')):
     store = app_state.provider_factory.create_vector_store(app_state.settings.vector_store_config)
     await store.delete_document(collection, document_id)
     return {"deleted": True, "collection": collection, "document_id": document_id}
@@ -415,11 +470,11 @@ async def feedback(request: FeedbackRequest):
 
     Score >= 7 is considered "satisfied"
     """
-    await app_state.metrics_tracker.save_feedback(
-        query_id=request.query_id,
-        score=request.score,
-        comment=request.comment,
-    )
+    try:
+        await app_state.metrics_tracker.save_feedback(
+            query_id=request.query_id, score=request.score, comment=request.comment)
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise HTTPException(404, 'Query not found or its history has expired') from exc
 
     return {
         "success": True,
@@ -438,11 +493,33 @@ async def get_metrics():
 @app.exception_handler(Exception)
 async def global_exception_handler(_request: Request, exc: Exception):
     """Global exception handler."""
-    print(f"Error processing request: {exc}")
+    logger.error('Unexpected request failure', exc_info=(type(exc), exc, exc.__traceback__))
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error", "error": str(exc)},
+        content={"detail": "Internal server error; check the service logs"},
     )
+
+
+@app.exception_handler(BusyError)
+async def busy_handler(_request: Request, exc: BusyError):
+    return JSONResponse(status_code=503, content={'detail': str(exc)}, headers={'Retry-After': '30'})
+
+
+@app.exception_handler(ValueError)
+async def invalid_value_handler(_request: Request, exc: ValueError):
+    return JSONResponse(status_code=422, content={'detail': str(exc)})
+
+
+@app.exception_handler(DownloadError)
+async def download_error_handler(_request: Request, exc: DownloadError):
+    return JSONResponse(status_code=502, content={'detail': str(exc)})
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_handler(_request: Request, exc: RequestValidationError):
+    # Avoid echoing oversized documents or metadata back in validation responses.
+    return JSONResponse(status_code=422, content={'detail': [
+        {key: error[key] for key in ('loc', 'msg', 'type')} for error in exc.errors()]})
 
 
 if __name__ == "__main__":

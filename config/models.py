@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 # ============================================
@@ -57,8 +57,10 @@ class EmbeddingProviderConfig(BaseModel):
     provider: EmbeddingProvider
     model: str
     revision: Optional[str] = None
-    dimension: int = 768
-    batch_size: int = 32
+    dimension: int = Field(default=768, ge=1)
+    batch_size: int = Field(default=32, ge=1, le=256)
+    queue_timeout_seconds: float = Field(default=30, gt=0, le=300)
+    max_pending: int = Field(default=16, ge=1, le=256)
     normalize: bool = True
     device: str = "cpu"  # cpu or cuda
 
@@ -85,10 +87,13 @@ class ChunkingConfig(BaseModel):
     semantic_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     preserve_metadata: bool = True
 
-    @field_validator("chunk_overlap")
-    @classmethod
-    def validate_overlap(cls, v: int, info) -> int:
-        return v
+    @model_validator(mode='after')
+    def validate_sizes(self):
+        if not self.min_chunk_size <= self.chunk_size <= self.max_chunk_size:
+            raise ValueError('Require min_chunk_size <= chunk_size <= max_chunk_size')
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError('chunk_overlap must be smaller than chunk_size')
+        return self
 
     class Config:
         use_enum_values = True
@@ -97,7 +102,7 @@ class ChunkingConfig(BaseModel):
 class RetrievalConfig(BaseModel):
     """Retrieval configuration."""
 
-    top_k: int = Field(default=5, ge=1, le=50)
+    top_k: int = Field(default=5, ge=1, le=100)
     hybrid_search: bool = True
     vector_weight: float = Field(default=0.7, ge=0.0, le=1.0)
     bm25_weight: float = Field(default=0.3, ge=0.0, le=1.0)
@@ -113,6 +118,8 @@ class RetrievalConfig(BaseModel):
     rerank_revision: Optional[str] = None
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     rerank_top_k: int = Field(default=10, ge=1, le=100)
+    queue_timeout_seconds: float = Field(default=30, gt=0, le=300)
+    max_pending: int = Field(default=16, ge=1, le=256)
 
     enable_query_expansion: bool = False
     expansion_method: Optional[str] = None
@@ -121,11 +128,6 @@ class RetrievalConfig(BaseModel):
     recency_boost_enabled: bool = True
     quality_boost_enabled: bool = True
     popularity_boost_enabled: bool = True
-
-    @field_validator("bm25_weight")
-    @classmethod
-    def validate_weights(cls, v: float, info) -> float:
-        return v
 
     class Config:
         use_enum_values = True

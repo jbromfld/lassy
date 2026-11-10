@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import unittest
+from core.providers.base import EmbeddingProvider
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -100,7 +101,8 @@ class PostgresTests(unittest.IsolatedAsyncioTestCase):
         from core.pipeline.documents import DocumentRequest, upsert_document
         from unittest.mock import Mock, AsyncMock
         embed = Mock(embed_batch=AsyncMock(side_effect=lambda texts: [[1.] + [0.]*767 for _ in texts]),
-                     get_model_name=lambda: 'test', get_dimension=lambda: 768)
+                     get_model_name=lambda: 'test', get_dimension=lambda: 768,
+                     split_text=lambda text: [text], chunking_identity=lambda: {}, prepare_document=EmbeddingProvider.prepare_document.__get__(object()))
         config = self.settings.chunking_config
         doc = DocumentRequest(content='VLM evidence.', title='Paper')
         first = await upsert_document(self.store, embed, config, 'corpus', '1', doc)
@@ -190,6 +192,91 @@ class PostgresTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 process.terminate()
                 await asyncio.to_thread(process.wait, 15)
+
+    async def test_metadata_updates_keep_embeddings_identity_sections_and_feedback(self):
+        from core.pipeline.documents import DocumentRequest, DocumentSection, upsert_document
+        from unittest.mock import Mock, AsyncMock
+        from datetime import datetime, timezone
+        embed=Mock(get_model_name=lambda:'test',get_dimension=lambda:768,chunking_identity=lambda:{}, prepare_document=EmbeddingProvider.prepare_document.__get__(object()),
+                   split_text=lambda text:[text],embed_batch=AsyncMock(side_effect=lambda texts:[[1.]+[0.]*767 for _ in texts]))
+        doc=DocumentRequest(content='Source text',sections=[DocumentSection(ref='p1',text='Evidence one.'),
+            DocumentSection(ref='p2',text='Evidence two.')],metadata={'old':'removed','count':'many','active':'wrong'})
+        first=await upsert_document(self.store,embed,self.settings.chunking_config,'c','1',doc)
+        rows=await self.store.hybrid_search('Evidence',[1.]+[0.]*767)
+        ids={r.chunk.id for r in rows}
+        self.assertTrue(all(r.chunk.vector is None for r in rows))
+        chunk=await self.store.get_chunk(rows[0].chunk.id)
+        self.assertIsInstance(chunk.vector[0],float)
+        query_id=uuid4()
+        await self.tracker.save_retrieval(query_id,'evidence',[{'chunk_id':str(chunk.id),'content':'DO NOT RETAIN','score':.5}],1.)
+        await self.tracker.save_feedback(query_id,9)
+        doc=doc.model_copy(update={'published_at':datetime(2026,1,1,tzinfo=timezone.utc),'title':'New title',
+                                  'metadata':{'count':'many','active':'wrong','new':'value'}})
+        second=await upsert_document(self.store,embed,self.settings.chunking_config,'c','1',doc)
+        self.assertNotEqual(first['revision'],second['revision'])
+        self.assertEqual(second['embeddings_generated'],0)
+        self.assertEqual(embed.embed_batch.await_count,1)
+        rows=await self.store.hybrid_search('Evidence',[1.]+[0.]*767,filter_dict={'collection':['c']})
+        self.assertEqual({r.chunk.id for r in rows},ids)
+        self.assertEqual({r.chunk.metadata['section_ref'] for r in rows},{'p1','p2'})
+        self.assertTrue(all(r.chunk.metadata['title']=='New title' and 'old' not in r.chunk.metadata for r in rows))
+        async with self.pool.acquire() as conn:
+            self.assertEqual(await conn.fetchval('SELECT num_feedback FROM embeddings WHERE id=$1',chunk.id),1)
+            self.assertEqual(await conn.fetchval('SELECT retrieval_count FROM embeddings WHERE id=$1',chunk.id),1)
+            self.assertNotIn('DO NOT RETAIN',await conn.fetchval('SELECT response::text FROM queries WHERE query_id=$1',query_id))
+        for filters in ({'count':3},{'active':True}):
+            self.assertEqual(await self.store.vector_search([1.]+[0.]*767,filter_dict=filters),[])
+        # Observation timestamps do not invalidate unchanged web content.
+        again=doc.model_copy(update={'metadata':{**doc.metadata,'scraped_at':'new observation'}})
+        result=await upsert_document(self.store,embed,self.settings.chunking_config,'c','1',again)
+        self.assertFalse(result['changed'])
+
+    async def test_delete_waits_for_preparation_and_leaves_no_resurrected_document(self):
+        from core.pipeline.documents import DocumentRequest, upsert_document
+        from unittest.mock import Mock
+        started=asyncio.Event(); release=asyncio.Event()
+        async def embedding(texts):
+            started.set(); await release.wait(); return [[1.]+[0.]*767 for _ in texts]
+        embed=Mock(get_model_name=lambda:'test',get_dimension=lambda:768,chunking_identity=lambda:{}, prepare_document=EmbeddingProvider.prepare_document.__get__(object()),
+                   split_text=lambda text:[text],embed_batch=embedding)
+        pending=asyncio.create_task(upsert_document(self.store,embed,self.settings.chunking_config,'c','1',DocumentRequest(content='Late evidence.')))
+        await asyncio.wait_for(started.wait(),1)
+        # The pool remains entirely available while model work is pending.
+        self.assertEqual(self.pool.get_idle_size(),self.pool.get_size())
+        deletion=asyncio.create_task(self.store.delete_document('c','1'))
+        await asyncio.sleep(0)
+        self.assertFalse(deletion.done())
+        release.set(); await asyncio.gather(pending,deletion)
+        self.assertEqual(await self.store.count(),0)
+        self.assertIsNone(await self.store.get_document_status('c','1'))
+
+    async def test_hybrid_candidate_count_scales_past_fifty(self):
+        chunks=[Chunk(uuid4(),f'Common evidence number {i}',f'candidate-{i}',[1.]+[0.]*767,{'collection':'c'}) for i in range(120)]
+        await self.store.insert_chunks(chunks)
+        rows=await self.store.hybrid_search('Common evidence',[1.]+[0.]*767,top_k=100,filter_dict={'collection':'c'})
+        self.assertEqual(len(rows),100)
+        self.assertTrue(all(row.chunk.vector is None for row in rows))
+
+    async def test_additive_migration_and_bounded_history_pruning_preserve_rated_queries(self):
+        ids=[uuid4() for _ in range(4)]
+        for id in ids:
+            await self.tracker.save_retrieval(id,'history',[],1.)
+        await self.tracker.save_feedback(ids[0],9)
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE queries SET created_at=NOW()-interval '100 days' WHERE query_id=ANY($1::uuid[])",ids[:3])
+            await conn.execute("UPDATE queries SET response=$2::jsonb WHERE query_id=$1",ids[0],json.dumps({'chunks':[{'chunk_id':'old','content':'secret excerpt','score':.5}]}))
+            await conn.execute('ALTER TABLE documents DROP COLUMN embedding_revision')
+            for _ in range(2): await conn.execute((ROOT/'db/003_practical.sql').read_text())
+            response=json.loads(await conn.fetchval('SELECT response::text FROM queries WHERE query_id=$1',ids[0]))
+            self.assertNotIn('content',response['chunks'][0])
+        self.assertEqual((await self.tracker.prune_history(limit=1,dry_run=True))['eligible'],1)
+        self.assertEqual((await self.tracker.prune_history(limit=1))['deleted'],1)
+        self.assertEqual((await self.tracker.prune_history())['deleted'],1)
+        async with self.pool.acquire() as conn:
+            self.assertEqual(set(await conn.fetchval('SELECT array_agg(query_id) FROM queries')),{ids[0],ids[3]})
+            self.assertEqual(await conn.fetchval('SELECT count(*) FROM metrics'),2)
+            self.assertEqual(await conn.fetchval('SELECT count(*) FROM feedback'),1)
+
 
 
 if __name__ == '__main__': unittest.main()

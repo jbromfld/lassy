@@ -20,7 +20,7 @@ def git(*args):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--registry',required=True,help='OCI registry hostname[:port] and optional namespace')
+    parser.add_argument('--registry',default='127.0.0.1:5001',help='OCI registry hostname[:port] and optional namespace (default: %(default)s)')
     parser.add_argument('--context',default='colima',help='Docker context used to build and push')
     parser.add_argument('--revision',default='HEAD',help='Committed Git revision to build; working-tree edits are excluded')
     parser.add_argument('--platform',default='linux/arm64')

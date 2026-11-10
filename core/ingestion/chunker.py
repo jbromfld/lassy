@@ -1,9 +1,8 @@
-"""Document chunking strategies."""
-
+"""Word-based document chunking that retains paragraphs and short endings."""
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 from uuid import UUID, uuid4
 
 from config.models import ChunkingConfig, ChunkStrategy
@@ -11,267 +10,98 @@ from config.models import ChunkingConfig, ChunkStrategy
 
 @dataclass
 class ChunkResult:
-    """Result of document chunking."""
-
     id: UUID
     content: str
     content_hash: str
     word_count: int
     char_count: int
-    metadata: Dict[str, Any]
+    metadata: dict[str, Any]
 
 
 class DocumentChunker:
-    """Document chunker with multiple strategies.
-
-    Implements fixed-size and recursive chunking strategies
-    as defined in DESIGN_DECISIONS.md.
-    """
-
     def __init__(self, config: ChunkingConfig):
-        """Initialize document chunker.
-
-        Args:
-            config: Chunking configuration
-        """
         self.config = config
-        self.strategy = config.strategy
-        self.chunk_size = config.chunk_size  # in words
-        self.chunk_overlap = config.chunk_overlap  # in words
-        self.min_chunk_size = config.min_chunk_size
-        self.max_chunk_size = config.max_chunk_size
-        self.separators = config.separators
-        self.keep_separator = config.keep_separator
 
-    def chunk_document(
-        self,
-        content: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> List[ChunkResult]:
-        """Chunk document using configured strategy.
-
-        Args:
-            content: Document content to chunk
-            metadata: Optional metadata to attach to chunks
-
-        Returns:
-            List of ChunkResult objects
-        """
-        if not content or not content.strip():
-            return []
-
-        # Clean content
+    def chunk_document(self, content, metadata=None):
         content = self._clean_content(content)
-
-        # Choose chunking strategy
-        if self.strategy == ChunkStrategy.FIXED:
+        if not content:
+            return []
+        if self.config.strategy == ChunkStrategy.FIXED:
             chunks = self._chunk_fixed(content)
-        elif self.strategy == ChunkStrategy.RECURSIVE:
-            chunks = self._chunk_recursive(content)
-        elif self.strategy == ChunkStrategy.SEMANTIC:
-            # Semantic chunking not implemented yet, fall back to recursive
-            chunks = self._chunk_recursive(content)
         else:
-            raise ValueError(f"Unknown chunking strategy: {self.strategy}")
+            # Retain the existing semantic alias; it still uses recursive splitting.
+            chunks = self._merge(self._units(content, self.config.separators))
+        if len(chunks) > 1 and len(chunks[-1].split()) < self.config.min_chunk_size:
+            merged = self._join_overlap(chunks[-2], chunks[-1])
+            if len(merged.split()) <= self.config.max_chunk_size:
+                chunks[-2:] = [merged]
+        return [ChunkResult(uuid4(), text, hashlib.sha256(text.encode()).hexdigest(),
+                len(text.split()), len(text), {**(metadata or {}),
+                'chunk_index': i, 'total_chunks': len(chunks)})
+                for i, text in enumerate(chunks)]
 
-        if not chunks:
-            # A valid short summary/section is still a searchable document.
-            chunks = [content]
-
-        # Convert to ChunkResult objects
-        results = []
-        for i, chunk_text in enumerate(chunks):
-            chunk_metadata = metadata.copy() if metadata else {}
-            chunk_metadata["chunk_index"] = i
-            chunk_metadata["total_chunks"] = len(chunks)
-
-            result = ChunkResult(
-                id=uuid4(),
-                content=chunk_text,
-                content_hash=self._hash_content(chunk_text),
-                word_count=len(chunk_text.split()),
-                char_count=len(chunk_text),
-                metadata=chunk_metadata,
-            )
-            results.append(result)
-
-        return results
-
-    def _chunk_fixed(self, content: str) -> List[str]:
-        """Fixed-size chunking strategy.
-
-        Splits text into fixed-size chunks based on word count,
-        with specified overlap.
-
-        Args:
-            content: Text to chunk
-
-        Returns:
-            List of chunk strings
-        """
-        words = content.split()
+    def _chunk_fixed(self, text):
+        words = list(re.finditer(r'\S+', text))
         chunks = []
-
-        if len(words) <= self.chunk_size:
-            # Content fits in one chunk
-            return [content]
-
-        # Calculate step size (chunk_size - overlap)
-        step = max(1, self.chunk_size - self.chunk_overlap)
-
-        i = 0
-        while i < len(words):
-            # Get chunk
-            chunk_words = words[i : i + self.chunk_size]
-
-            # Skip if chunk is too small (unless it's the last one)
-            if len(chunk_words) < self.min_chunk_size and i + self.chunk_size < len(
-                words
-            ):
-                i += step
-                continue
-
-            chunk_text = " ".join(chunk_words)
-            chunks.append(chunk_text)
-
-            # Move to next chunk
-            i += step
-
+        step = self.config.chunk_size - self.config.chunk_overlap
+        for start in range(0, len(words), step):
+            end = min(start + self.config.chunk_size, len(words))
+            chunks.append(text[words[start].start():words[end-1].end()])
+            if end == len(words):
+                break
         return chunks
 
-    def _chunk_recursive(self, content: str) -> List[str]:
-        """Recursive chunking strategy.
-
-        Attempts to split text at natural boundaries (paragraphs, sentences)
-        while respecting size constraints.
-
-        Args:
-            content: Text to chunk
-
-        Returns:
-            List of chunk strings
-        """
-        return self._recursive_split(content, self.separators.copy())
-
-    def _recursive_split(self, text: str, separators: List[str]) -> List[str]:
-        """Recursively split text using separators.
-
-        Args:
-            text: Text to split
-            separators: List of separators (ordered by priority)
-
-        Returns:
-            List of chunks
-        """
+    def _units(self, text, separators):
+        if len(text.split()) <= self.config.chunk_size:
+            return [text]
         if not separators:
-            # No more separators, use fixed chunking
-            return self._chunk_fixed(text)
+            # Overlap is added at merge time, not twice at recursive boundaries.
+            words = list(re.finditer(r'\S+', text))
+            return [text[words[i].start():words[min(i+self.config.chunk_size, len(words))-1].end()]
+                    for i in range(0, len(words), self.config.chunk_size)]
+        separator, *remaining = separators
+        if not separator or separator not in text:
+            return self._units(text, remaining)
+        parts = text.split(separator)
+        units = []
+        for i, part in enumerate(parts):
+            if i < len(parts)-1 and self.config.keep_separator:
+                part += separator
+            if part.strip():
+                units.extend(self._units(part, remaining))
+        return units
 
-        # Try current separator
-        separator = separators[0]
-        remaining_separators = separators[1:]
-
-        # Split by current separator
-        if separator:
-            splits = text.split(separator)
-
-            # Keep separator if configured
-            if self.keep_separator and separator != " ":
-                # Re-add separator to splits (except last one)
-                splits = [
-                    split + separator if i < len(splits) - 1 else split
-                    for i, split in enumerate(splits)
-                ]
-        else:
-            # Empty separator means split by characters
-            splits = list(text)
-
-        # Merge splits into chunks
-        chunks = []
-        current_chunk = []
-        current_word_count = 0
-
-        for split in splits:
-            split = split.strip()
-            if not split:
-                continue
-
-            split_word_count = len(split.split())
-
-            # Check if adding this split would exceed chunk size
-            if current_word_count + split_word_count > self.chunk_size and current_chunk:
-                # Save current chunk
-                chunk_text = " ".join(current_chunk)
-                if len(chunk_text.split()) >= self.min_chunk_size:
-                    chunks.append(chunk_text)
-
-                # Start new chunk with overlap
-                if self.chunk_overlap > 0 and current_chunk:
-                    # Keep last N words for overlap
-                    overlap_text = " ".join(current_chunk)
-                    overlap_words = overlap_text.split()[-self.chunk_overlap :]
-                    current_chunk = overlap_words
-                    current_word_count = len(current_chunk)
-                else:
-                    current_chunk = []
-                    current_word_count = 0
-
-            # Add split to current chunk
-            current_chunk.append(split)
-            current_word_count += split_word_count
-
-            # Check if current chunk exceeds max size
-            if current_word_count > self.max_chunk_size:
-                # Split is too large, need to recursively split it
-                if remaining_separators:
-                    sub_chunks = self._recursive_split(split, remaining_separators)
-                    for sub_chunk in sub_chunks:
-                        if len(sub_chunk.split()) >= self.min_chunk_size:
-                            chunks.append(sub_chunk)
-                else:
-                    # No more separators, use fixed chunking
-                    sub_chunks = self._chunk_fixed(split)
-                    chunks.extend(sub_chunks)
-
-                # Reset current chunk
-                current_chunk = []
-                current_word_count = 0
-
-        # Add final chunk
-        if current_chunk:
-            chunk_text = " ".join(current_chunk)
-            if len(chunk_text.split()) >= self.min_chunk_size:
-                chunks.append(chunk_text)
-
+    def _merge(self, units):
+        chunks, current = [], ''
+        for unit in units:
+            joined = self._join(current, unit)
+            if current and len(joined.split()) > self.config.chunk_size:
+                chunks.append(current.strip())
+                # Only add as much overlap as fits alongside the next unit.
+                room = max(0, self.config.chunk_size - len(unit.split()))
+                overlap = min(self.config.chunk_overlap, room)
+                current = ' '.join(current.split()[-overlap:]) + ' ' if overlap else ''
+                joined = self._join(current, unit)
+            current = joined
+        if current.strip():
+            chunks.append(current.strip())
         return chunks
 
-    def _clean_content(self, content: str) -> str:
-        """Clean document content.
+    @staticmethod
+    def _join(left, right):
+        if not left or not right or left[-1].isspace() or right[0].isspace():
+            return left + right
+        return left + ' ' + right
 
-        Args:
-            content: Raw content
+    def _join_overlap(self, left, right):
+        left_words, right_words = left.split(), list(re.finditer(r'\S+', right))
+        for count in range(min(self.config.chunk_overlap, len(left_words), len(right_words)), 0, -1):
+            if left_words[-count:] == [word.group() for word in right_words[:count]]:
+                right = right[right_words[count-1].end():]
+                break
+        return self._join(left, right)
 
-        Returns:
-            Cleaned content
-        """
-        # Remove excessive whitespace
-        content = re.sub(r"\s+", " ", content)
-
-        # Remove excessive newlines
-        content = re.sub(r"\n{3,}", "\n\n", content)
-
-        # Trim
-        content = content.strip()
-
-        return content
-
-    def _hash_content(self, content: str) -> str:
-        """Generate hash for content (for deduplication).
-
-        Args:
-            content: Content to hash
-
-        Returns:
-            SHA-256 hash (hex string)
-        """
-        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    @staticmethod
+    def _clean_content(content):
+        content = re.sub(r'[^\S\n]+', ' ', content.replace('\r\n', '\n').replace('\r', '\n'))
+        return re.sub(r'\n{3,}', '\n\n', content).strip()
