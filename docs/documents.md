@@ -1,121 +1,75 @@
-# Shared documents and evaluation
+# Document storage, upgrades, and model identity
 
-[← Quickstart](../README.md)
+[Quickstart](../README.md)
 
-Run commands from the repository root unless stated otherwise.
+Documents are keyed by collection/document ID. Text, section references, metadata,
+and publication dates determine the document revision. Chunking, model identity,
+and token limits determine the embedding revision. Observation-only `scraped_at`
+metadata is excluded, preserving existing ingestion fingerprints.
 
-## Shared document ingestion
+Repeated deliveries reuse the stored result; metadata-only updates retain vectors
+and chunk IDs. Text changes prepare all chunks/embeddings before a short atomic
+replacement transaction. PostgreSQL advisory locks serialize the full read,
+preparation, publication, and deletion sequence across processes. No transaction
+is held during model inference; the operation holds one pool connection and reuses
+it, so a size-one pool also works. Lock waits default to 30 seconds. Cancellation
+unlocks the session or closes its connection before returning it to the pool.
 
-Lassy owns the single text ingestion/retrieval pipeline for all clients: chunking,
-embedding, PostgreSQL keyword + cosine search, reciprocal rank fusion, boosts and
-optional reranking. Clients own source records and answer generation. Both legacy
-`POST /ingest` (including crawled pages) and document upserts use the same pipeline.
+## Fresh installations
 
-For an existing retrieval-only installation, apply the **additive** migration before
-restarting the API; do not reset your database:
+Apply `db/init.sql` only to an empty database. The runtime needs access to
+`documents`, `embeddings`, and `lassy_index_identity`. A fresh empty index binds
+its model/chunking identity at first startup. All runtime processes must use that
+same identity. There are no query, metrics, or feedback tables in the fresh schema.
 
-```bash
-psql -h localhost -U YOUR_USER -d YOUR_DATABASE -v ON_ERROR_STOP=1 -1 \
-  -f db/002_documents.sql -f db/003_practical.sql
-```
+## Upgrade existing installations
 
-New installations use `db/init.sql`, which includes both schema additions.
-The new `003_practical.sql` adds an embedding fingerprint and removes retained chunk
-text from old query-history snapshots; document text, vectors, metrics and feedback
-remain intact. Apply the SQL before restarting the new API. Readiness
-requires the new table and fingerprint column. Existing chunks remain searchable. Legacy chunks without
-collection/document metadata remain unscoped: a collection filter excludes them.
-Re-ingesting legacy material creates scoped documents; old unscoped chunks require
-explicit cleanup if you want to avoid duplicates in unfiltered searches.
+Stop old writers during adoption and back up the database/model configuration.
+Existing vectors must match the configured pinned model snapshot, embedding
+dimension, normalization, token limit, and chunking configuration.
 
-```bash
-curl -X PUT http://localhost:8082/documents/lalaland-rss/123 \
-  -H 'Content-Type: application/json' \
-  -d '{"content":"A short saved VLM summary.","title":"VLM paper","url":"https://example.org/paper","content_type":"rss_summary","published_at":"2026-09-12T10:00:00Z"}'
-curl http://localhost:8082/query -H 'Content-Type: application/json' \
-  -d '{"query":"vision language models","filters":{"collection":["lalaland-rss","lalaland-corpus"]},"top_k":10}'
-curl -X DELETE http://localhost:8082/documents/lalaland-rss/123
-```
+1. Apply `db/002_documents.sql` and `db/003_practical.sql` if not already applied.
+   These historical migrations precede the new refactor and are for legacy schemas.
+2. Apply additive `db/004_mcp.sql`, transactionally with `ON_ERROR_STOP=1`.
+   It creates only index identity metadata; documents, vectors, historical tracking
+   tables, counters, and functions are preserved.
+3. Recover/verify the exact model snapshot used to build the existing vectors.
+   Set `LOCAL_EMBEDDING_REVISION` to that immutable commit, preserving the old model
+   name, dimensions, device-relevant settings, and chunking configuration. The
+   shared stack's MPNet baseline is `e8c3b32edf5434bc2275fc9bab85f82640a19130`;
+   this baseline alone is not proof that an arbitrary older index used it.
+4. Run `lassy-models prepare` under the explicit runtime environment/cache.
+5. Explicitly attest the verified identity:
 
-`PUT /documents/{collection}/{document_id}` accepts `content`, optional `title`,
-`url`, `published_at`, `content_type`, `metadata`, and `sections` (each with `ref`
-and `text`). When supplied, sections are the authoritative text for chunking;
-provide every section you want indexed. Each chunk retains its section reference.
-Clients send original text, not embeddings or retrieval chunks. Collection and
-ID identify a document; they are logical scopes, not authentication boundaries.
+   ```sh
+   LASSY_ENV_FILE=/absolute/private/lassy.env uv run --no-sync lassy-models adopt-index
+   ```
 
-Upserts publish all replacement chunks atomically after successful embedding.
-Identical requests skip embedding when their document/configuration revision is
-already indexed. Changed text, metadata, chunking configuration, model name or
-dimension changes the document revision. Metadata-only changes retain existing
-vectors, chunk IDs, section references, retrieval counts and feedback. Embedding
-fingerprints include the tokenizer limit and normalization options. Crawl
-`scraped_at` observations do not invalidate an otherwise unchanged document. Identical text in different documents retains
-separate provenance. Deletes are idempotent. Preparation, replacement and deletion for each document
-are serialized within the supported single API process, with a 30-second lock
-wait limit (HTTP 503 on contention). No database connection is held during model
-work. Keep one API process and one replica when accepting document writes;
-transaction locks alone do not order preprocessing across multiple processes.
-Avoid overlapping writer replicas during rolling updates (pause source delivery
-or use a recreate deployment strategy).
-Query chunks include `collection`, `document_id`, `revision`, `content_type`,
-`published_at` and the source section reference in `section`.
+   If the old configuration **omitted** `LOCAL_EMBEDDING_REVISION`, use
+   `adopt-index --legacy-unpinned` after verifying which snapshot it actually used.
+   This preserves its original unqualified model fingerprint while loading the
+   verified pinned snapshot offline. When the old revision was explicit, omit the
+   flag. Adoption inserts identity metadata once and never updates vectors.
+6. Deploy the updated HTTP image/start MCP hosts. Verify health and retrieval,
+   then resume Lalaland publishing. Historical tracking tables are ignored and
+   never automatically deleted; remove them separately only if desired.
 
-This update changes chunk boundaries and token-limit handling. Existing vectors
-remain searchable, but backfill source records to benefit from the fixes. From the
-Lalaland backend runtime, using its database/settings, run
-`python -m backend.services.knowledge backfill`, then allow scheduled delivery
-(or run its sync command). See [native/Compose/Kubernetes commands](../../lalaland/docs/knowledge.md). The first delivery under the
-new pipeline re-embeds each document once; later date/title changes reuse vectors.
-Other clients should resend their original documents. Do not reset the index.
+Startup refuses unverified populated indexes and mismatched identities. Adoption
+refuses to replace an already recorded identity. If the old weights cannot be
+established, build a separate empty index with the desired model, republish source
+documents, validate retrieval, then switch consumers. Never guess the old identity
+or silently change vector spaces. Changing model/revision/dimension, normalization,
+token limits, or chunking similarly requires this explicit new-index/reindex flow.
 
-Embedding weight changes under the same model name require bumping
-`PIPELINE_VERSION` in `core/pipeline/documents.py` and backfilling every source.
-Do not mix different embedding models in one searchable index; stop serving
-queries during a full model migration or build a replacement index. The document
-API does not fetch supplied URLs; each source application retains its fetching policy.
+Lalaland's durable outbox still publishes supplied RSS/corpus text and deletions
+through HTTP. Use its [backfill guide](../../lalaland/docs/knowledge.md) when
+populating a new index. Lassy has no crawling, history-pruning, or evaluation CLI.
 
-### Evaluate retrieval centrally
+## Rollout and rollback
 
-Run the same HTTP evaluation against all source types, using manually judged
-expected document IDs. Create a JSONL dataset such as:
-
-```json
-{"query":"vision language model deployment","filters":{"collection":"lalaland-corpus"},"expected":[{"collection":"lalaland-corpus","document_id":"123"}]}
-```
-
-Replace the example with real judgments, then run:
-
-```bash
-python evaluate.py judgments.jsonl --url http://localhost:8082 --top-k 10
-```
-
-The report includes document recall@k, reciprocal rank, and per-query retrieval
-IDs for inspection. Repeated chunks count as one document. Include RSS, corpus,
-and web-document judgments; compare per-query results when tuning the one shared
-pipeline. This measures retrieval, not generated-answer quality or exhaustive
-coverage of every article about a topic.
-
-## Query-history retention
-
-New query-history records store chunk identifiers, citations, scores and document
-provenance, without copying source excerpts. Feedback still uses the recorded
-chunk IDs. Deleting an indexed document removes its searchable text; historical
-query questions and feedback remain.
-
-There is no automatic pruning schedule. From the repository root, using the API's
-database settings, preview and remove old **unrated** queries in bounded batches:
-
-```bash
-python -m core.metrics.prune --days 90 --limit 1000 --dry-run
-python -m core.metrics.prune --days 90 --limit 1000
-# Compose equivalent:
-docker compose exec lassy python -m core.metrics.prune --days 90 --dry-run
-# Managed Kubernetes equivalent:
-kubectl --context colima -n lassy exec deployment/lassy -- python -m core.metrics.prune --days 90 --dry-run
-```
-
-Each invocation removes at most `limit` eligible queries and their metrics. Repeat
-if needed. Rated queries and their metrics/feedback are preserved indefinitely,
-so pruning does not change feedback-based ranking. Old query IDs removed by
-pruning return 404 when feedback is submitted. No source documents are deleted.
+Source changes do not migrate live databases or publish/promote images. Complete
+model preparation/adoption before switching the managed API image. Keep the old
+image and database backup for rollback. The additive migration and preserved legacy
+columns/tables allow the previous service to run again with its original settings;
+stop the new writers before rollback. Clients must use the matching tool/response
+contract (feedback identifiers and the standalone adapter are retired).

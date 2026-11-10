@@ -1,0 +1,1 @@
+"""Synthetic Lassy verification fixtures."""

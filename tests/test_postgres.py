@@ -1,282 +1,278 @@
-"""Opt-in integration tests; only a uniquely named disposable database is changed.
+"""Opt-in PostgreSQL/process/stdio tests, creating only uniquely named disposable DBs."""
 
-Run RAG_TEST_POSTGRES=1 POSTGRES_HOST=127.0.0.1 DEBUG=false python -m unittest discover -s tests -v.
-The configured user must be allowed to create databases and pgvector extensions.
-Set RAG_TEST_MODEL=1 as well to test the API and CLI with the cached embedding model.
-"""
 import asyncio
 import json
 import os
-from pathlib import Path
-import socket
-import subprocess
 import sys
-import time
+import tempfile
 import unittest
-from core.providers.base import EmbeddingProvider
-from unittest.mock import patch
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import asyncpg
-import httpx
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
-from api import main
-from config import get_settings
-from core.metrics import MetricsTracker
-from core.providers.base import Chunk
-from core.providers.vector_store.pgvector import PgVectorStore
+from lassy.concurrency import BusyError
+from lassy.config import Settings
+from lassy.documents import DocumentRequest
+from lassy.service import Service, index_identity
+from lassy.store import PgVectorStore
+from tests.process_fixture import SyntheticEmbedder
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@unittest.skipUnless(os.getenv('RAG_TEST_POSTGRES') == '1', 'set RAG_TEST_POSTGRES=1 for disposable-database integration tests')
+@unittest.skipUnless(
+    os.environ.get("LASSY_TEST_POSTGRES") == "1",
+    "Set LASSY_TEST_POSTGRES=1 for isolated PostgreSQL integration",
+)
 class PostgresTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.settings = get_settings()
-        self.connection = dict(host=self.settings.postgres_host, port=self.settings.postgres_port,
-            user=self.settings.postgres_user, password=self.settings.postgres_password)
-        self.name = 'rag_retrieval_test_' + uuid4().hex
-        self.admin = await asyncpg.connect(**self.connection, database=self.settings.postgres_db)
-        self.created = False
-        self.pool = None
-        self.addAsyncCleanup(self.cleanup)
-        await self.admin.execute(f'CREATE DATABASE "{self.name}"')
-        self.created = True
-        self.pool = await asyncpg.create_pool(**self.connection, database=self.name, min_size=1, max_size=3)
-        async with self.pool.acquire() as conn:
-            await conn.execute((ROOT/'db/init.sql').read_text())
-        self.store = PgVectorStore(self.settings.vector_store_config, self.pool)
-        self.tracker = MetricsTracker(self.pool)
+        self.admin_dsn = os.environ.get(
+            "LASSY_TEST_ADMIN_DSN", "postgresql:///postgres"
+        )
+        self.database = "lassy_test_" + uuid4().hex
+        self.admin = await asyncpg.connect(self.admin_dsn)
+        await self.admin.execute(f'CREATE DATABASE "{self.database}"')
+        parts = urlsplit(self.admin_dsn)
+        self.dsn = urlunsplit(
+            (parts.scheme, parts.netloc, "/" + self.database, parts.query, "")
+        )
+        try:
+            self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=1)
+            async with self.pool.acquire() as conn:
+                await conn.execute((ROOT / "db/init.sql").read_text())
+            self.settings = Settings(postgres_user="test", postgres_password="test")
+            self.service = Service(self.settings, self.pool, SyntheticEmbedder())
+            await self.service.ready(initialize=True)
+        except BaseException:
+            await self.asyncTearDown()
+            raise
 
-    async def cleanup(self):
-        if self.pool: await self.pool.close()
-        if self.created: await self.admin.execute(f'DROP DATABASE "{self.name}" WITH (FORCE)')
+    async def asyncTearDown(self):
+        if hasattr(self, "pool"):
+            await asyncio.wait_for(self.pool.close(), 10)
+        await self.admin.execute(f'DROP DATABASE "{self.database}" WITH (FORCE)')
         await self.admin.close()
 
-    async def test_initialization_search_deduplication_and_feedback(self):
+    async def test_document_search_metadata_and_no_tracking_writes(self):
+        doc = DocumentRequest(
+            content="Synthetic evidence about local retrieval.",
+            title="First",
+            metadata={"active": True},
+        )
+        first = await self.service.upsert("c", "1", doc)
+        response = await self.service.search(
+            {"query": "evidence", "filters": {"collection": ["c"], "active": True}}
+        )
+        self.assertTrue(response["chunks"])
+        ids = [c["chunk_id"] for c in response["chunks"]]
+        second = await self.service.upsert(
+            "c", "1", doc.model_copy(update={"title": "Updated"})
+        )
+        self.assertEqual(second["embeddings_generated"], 0)
+        self.assertNotEqual(first["revision"], second["revision"])
+        rows = await self.service.search({"query": "evidence"})
+        self.assertEqual(ids, [c["chunk_id"] for c in rows["chunks"]])
+        self.assertEqual(rows["chunks"][0]["title"], "Updated")
+        self.assertEqual(
+            (
+                await self.service.search(
+                    {"query": "evidence", "filters": {"active": "true"}}
+                )
+            )["chunks"],
+            [],
+        )
         async with self.pool.acquire() as conn:
-            self.assertIsNone(await conn.fetchval("SELECT to_regclass('public.configuration_profiles')"))
-            columns = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name IN ('embeddings', 'queries')")
-            self.assertNotIn('profile_id', [row['column_name'] for row in columns])
-            self.assertNotIn('config_snapshot', [row['column_name'] for row in columns])
-        chunk_id = uuid4()
-        vector = [1.0] + [0.0]*767
-        await self.store.insert_chunk(Chunk(id=chunk_id, content="The user's guide: how does PostgreSQL retrieval work?",
-            content_hash='integration-hash', vector=vector,
-            metadata={"author'": "O'Reilly", 'active': True, 'count': 3}))
-        await self.store.insert_chunk(Chunk(id=uuid4(), content="The user's guide: how does PostgreSQL retrieval work?",
-            content_hash='integration-hash', vector=vector,
-            metadata={"author'": "O'Reilly", 'active': True, 'count': 3}))
-        self.assertEqual(await self.store.count(), 1)
-        for search in ('vector', 'keyword', 'hybrid'):
-            args = dict(top_k=5, filter_dict={"author'": ["O'Reilly"], 'active': True, 'count': 3})
-            if search == 'vector': results = await self.store.vector_search(vector, **args)
-            elif search == 'keyword': results = await self.store.keyword_search("user's guide?", **args)
-            else: results = await self.store.hybrid_search("user's guide?", vector, **args)
-            self.assertEqual([r.chunk.id for r in results], [chunk_id])
-        self.assertEqual(await self.store.count({"author'": "O'Reilly"}), 1)
-        self.assertEqual(await self.store.count({"author'": "x' OR true --"}), 0)
-        query_id = uuid4()
-        chunks = [{'chunk_id': str(chunk_id), 'content': 'guide', 'score': .4}]
-        await self.tracker.save_retrieval(query_id, 'guide', chunks, 12.)
-        await self.tracker.save_feedback(query_id, 9, 'helpful')
+            for table in ("queries", "feedback", "metrics"):
+                self.assertIsNone(await conn.fetchval("SELECT to_regclass($1)", table))
+                await conn.execute(f"CREATE TABLE {table}(sentinel TEXT)")
+                await conn.execute(f"INSERT INTO {table} VALUES ('preserved')")
+            await conn.execute(
+                "ALTER TABLE embeddings ADD COLUMN avg_feedback_score FLOAT, ADD COLUMN num_feedback INT DEFAULT 0, ADD COLUMN retrieval_count INT DEFAULT 0"
+            )
+        await self.service.search({"query": "evidence"})
         async with self.pool.acquire() as conn:
-            self.assertEqual(await conn.fetchval('SELECT retrieved_chunks FROM queries WHERE query_id=$1', query_id), [chunk_id])
-            self.assertEqual(await conn.fetchval('SELECT num_feedback FROM embeddings WHERE id=$1', chunk_id), 1)
-            self.assertEqual(await conn.fetchval('SELECT retrieval_count FROM embeddings WHERE id=$1', chunk_id), 1)
-            await conn.execute("""CREATE FUNCTION reject_metrics() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'test failure'; END; $$ LANGUAGE plpgsql;
-                CREATE TRIGGER reject_metrics BEFORE INSERT ON metrics FOR EACH ROW EXECUTE FUNCTION reject_metrics();""")
-        failed_id = uuid4()
-        with self.assertRaises(asyncpg.PostgresError):
-            await self.tracker.save_retrieval(failed_id, 'guide', chunks, 12.)
-        async with self.pool.acquire() as conn:
-            self.assertEqual(await conn.fetchval('SELECT count(*) FROM queries WHERE query_id=$1', failed_id), 0)
-            self.assertEqual(await conn.fetchval('SELECT retrieval_count FROM embeddings WHERE id=$1', chunk_id), 1)
-        summary = await self.tracker.get_metrics_summary()
-        self.assertEqual(summary['total_queries'], 1)
-        self.assertEqual(summary['avg_feedback_score'], 9)
-        self.assertEqual(await self.store.delete_by_filter({"author'": "O'Reilly"}), 1)
+            for table in ("queries", "feedback", "metrics"):
+                self.assertEqual(
+                    [
+                        dict(row)
+                        for row in await conn.fetch("SELECT sentinel FROM " + table)
+                    ],
+                    [{"sentinel": "preserved"}],
+                )
+        await self.service.delete("c", "1")
+        self.assertEqual(
+            (await self.service.search({"query": "evidence"}))["chunks"], []
+        )
 
-    async def test_document_atomic_replacement_identity_and_delete(self):
-        from core.pipeline.documents import DocumentRequest, upsert_document
-        from unittest.mock import Mock, AsyncMock
-        embed = Mock(embed_batch=AsyncMock(side_effect=lambda texts: [[1.] + [0.]*767 for _ in texts]),
-                     get_model_name=lambda: 'test', get_dimension=lambda: 768,
-                     split_text=lambda text: [text], chunking_identity=lambda: {}, prepare_document=EmbeddingProvider.prepare_document.__get__(object()))
-        config = self.settings.chunking_config
-        doc = DocumentRequest(content='VLM evidence.', title='Paper')
-        first = await upsert_document(self.store, embed, config, 'corpus', '1', doc)
-        again = await upsert_document(self.store, embed, config, 'corpus', '1', doc)
-        self.assertTrue(first['changed'])
-        self.assertFalse(again['changed'])
-        self.assertEqual(again['embeddings_generated'], 0)
-        self.assertEqual(embed.embed_batch.await_count, 1)
-        await upsert_document(self.store, embed, config, 'other', '1', doc)
-        self.assertEqual(await self.store.count(), 2)
+    async def test_additive_migration_adoption_and_identity_mismatch(self):
+        await self.service.upsert(
+            "c", "1", DocumentRequest(content="Preserved vectors.")
+        )
         async with self.pool.acquire() as conn:
-            await conn.execute("""CREATE FUNCTION reject_document() RETURNS trigger AS $$
-                BEGIN IF NEW.content='Rejected change.' THEN RAISE EXCEPTION 'rejected'; END IF;
-                RETURN NEW; END; $$ LANGUAGE plpgsql;
-                CREATE TRIGGER reject_document BEFORE INSERT ON embeddings
-                FOR EACH ROW EXECUTE FUNCTION reject_document();""")
-        with self.assertRaises(asyncpg.PostgresError):
-            await upsert_document(self.store, embed, config, 'corpus', '1', DocumentRequest(content='Rejected change.'))
-        self.assertEqual(await self.store.count(), 2)
-        rows = await self.store.hybrid_search('VLM', [1.]+[0.]*767, filter_dict={'collection':'corpus'})
-        self.assertEqual([r.chunk.content for r in rows], ['VLM evidence.'])
-        await upsert_document(self.store, embed, config, 'corpus', '1', DocumentRequest(content='New finding.'))
-        rows = await self.store.vector_search([1.]+[0.]*767, filter_dict={'collection':'corpus'})
-        self.assertEqual([r.chunk.content for r in rows], ['New finding.'])
-        await self.store.delete_document('corpus', '1')
-        await self.store.delete_document('corpus', '1')
-        self.assertEqual(await self.store.count(), 1)
+            before = await conn.fetch("SELECT id, content_vector::text FROM embeddings")
+            await conn.execute("DROP TABLE lassy_index_identity")
+            for _ in range(2):
+                await conn.execute((ROOT / "db/004_mcp.sql").read_text())
+        with self.assertRaisesRegex(RuntimeError, "unverified"):
+            await self.service.ready(initialize=True)
         async with self.pool.acquire() as conn:
-            await conn.execute((ROOT/'db/002_documents.sql').read_text())
-            self.assertEqual(await conn.fetchval('SELECT count(*) FROM documents'), 1)
+            await conn.execute(
+                "INSERT INTO lassy_index_identity VALUES(TRUE,$1::jsonb,TRUE)",
+                json.dumps(index_identity(self.settings, self.service.embedder)),
+            )
+        await self.service.ready()
+        self.assertEqual(
+            self.service.embedder.get_model_name(), self.settings.local_embedding_model
+        )
+        self.settings.local_embedding_revision = "f" * 40
+        with self.assertRaisesRegex(RuntimeError, "differs"):
+            await self.service.ready()
+        async with self.pool.acquire() as conn:
+            self.assertEqual(
+                await conn.fetch("SELECT id, content_vector::text FROM embeddings"),
+                before,
+            )
 
-    async def test_explicit_schema_reset(self):
-        async with self.pool.acquire() as conn:
-            await conn.execute("CREATE MATERIALIZED VIEW metrics_by_config AS SELECT count(*) FROM queries")
-            await conn.execute((ROOT/'db/cleanup.sql').read_text())
-            await conn.execute((ROOT/'db/init.sql').read_text())
-            self.assertIsNone(await conn.fetchval("SELECT to_regclass('public.configuration_profiles')"))
-            self.assertEqual(await conn.fetchval("SELECT count(*) FROM queries"), 0)
+    async def test_lock_timeout_cancel_and_size_one_pool(self):
+        other = await asyncpg.create_pool(self.dsn, min_size=1, max_size=1)
+        try:
+            store = PgVectorStore(other, lock_timeout=0.1)
+            async with self.service.store.document_operation("c", "1"):
+                with self.assertRaises(BusyError):
+                    async with store.document_operation("c", "1"):
+                        self.fail("concurrent lock acquired")
 
-    @unittest.skipUnless(os.getenv('RAG_TEST_MODEL') == '1', 'set RAG_TEST_MODEL=1 for live API/CLI model test')
-    async def test_standalone_api_and_cli_with_no_copilot_key(self):
-        with socket.socket() as sock:
-            sock.bind(('127.0.0.1', 0))
-            port = sock.getsockname()[1]
-        env = {**os.environ, 'POSTGRES_DB': self.name, 'POSTGRES_HOST': self.settings.postgres_host,
-            'POSTGRES_PORT': str(self.settings.postgres_port), 'POSTGRES_USER': self.settings.postgres_user,
-            'POSTGRES_PASSWORD': self.settings.postgres_password, 'COPILOT_API_KEY': '', 'DEBUG': 'false',
-            'RETRIEVAL_TOP_K': '2', 'CHUNK_SIZE': '200', 'ENABLE_RERANKING': 'false',
-            'HF_HUB_OFFLINE': '1', 'RAG_SERVICE_URL': f'http://127.0.0.1:{port}'}
-        # Keep subprocess output off the terminal (connection exceptions can include sensitive context).
-        import tempfile
-        with tempfile.TemporaryFile(mode='w+') as log:
-            process = subprocess.Popen([sys.executable, '-m', 'uvicorn', 'api.main:app', '--host', '127.0.0.1', '--port', str(port)], cwd=ROOT, env=env, stdout=log, stderr=log)
+                async def waiting():
+                    async with PgVectorStore(other).document_operation("c", "1"):
+                        self.fail("cancelled waiter acquired lock")
+
+                task = asyncio.create_task(waiting())
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            async with store.document_operation("c", "1"):
+                pass
+
+            async def cancel_holder():
+                async with store.document_operation("c", "1"):
+                    asyncio.current_task().cancel()
+                    await asyncio.sleep(0)
+
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.create_task(cancel_holder())
+            async with self.service.store.document_operation("c", "1"):
+                pass
+        finally:
+            await asyncio.wait_for(other.close(), 3)
+
+    async def launch(self, action, signals, hold=False):
+        return await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "tests.process_fixture",
+            action,
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "LASSY_TEST_DSN": self.dsn,
+                "LASSY_TEST_SIGNALS": signals,
+                "LASSY_TEST_HOLD": str(int(hold)),
+            },
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+    async def process_race(self, action):
+        processes = []
+        with tempfile.TemporaryDirectory(prefix="lassy-process-") as signals:
             try:
-                async with httpx.AsyncClient(base_url=env['RAG_SERVICE_URL'], timeout=90) as client:
-                    deadline = time.monotonic() + 90
-                    while True:
-                        if process.poll() is not None:
-                            log.seek(0)
-                            # Local model errors only; never print full logs/credentials.
-                            output = log.read()
-                            message = output[-1200:].replace(self.settings.postgres_password, '<redacted>')
-                            self.fail('API exited during startup: ' + message)
-                        try:
-                            response = await client.get('/health')
-                            if response.status_code == 200: break
-                        except httpx.ConnectError: pass
-                        if time.monotonic() > deadline: self.fail('API readiness timeout')
-                        await asyncio.sleep(.25)
-                    self.assertEqual((await client.get('/report')).status_code, 404)
-                    self.assertEqual((await client.get('/profiles')).status_code, 404)
-                    self.assertEqual((await client.get('/metrics')).status_code, 200)
-                    ingestion = await client.post('/ingest', json={'title': 'Standalone retrieval guide', 'content': ('Standalone retrieval uses PostgreSQL pgvector and local embeddings. No Copilot API key or VS Code process is required. ' * 12)})
-                    self.assertEqual(ingestion.status_code, 200, ingestion.text)
-                    self.assertGreater(ingestion.json()['chunks_created'], 0)
-                    proc = await asyncio.create_subprocess_exec(sys.executable, 'cli.py', 'query', 'How does standalone retrieval work?', cwd=ROOT, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                    stdout, stderr = await asyncio.wait_for(proc.communicate(), 90)
-                    self.assertEqual(proc.returncode, 0, stderr.decode())
-                    payload = json.loads(stdout.decode().split('\nStatus:')[0])
-                    self.assertGreater(len(payload['chunks']), 0)
-                    self.assertTrue(payload['feedback_available'])
-                    self.assertLessEqual(len(payload['chunks']), 2)
-                    self.assertEqual(payload['chunks'][0]['citation'], '[1]')
-                    self.assertEqual(payload['chunks'][0]['url'], '')
-                    feedback = await client.post('/feedback', json={'query_id': payload['query_id'], 'score': 9})
-                    self.assertEqual(feedback.status_code, 200, feedback.text)
+                first = await self.launch("upsert", signals, hold=True)
+                processes.append(first)
+                self.assertEqual(
+                    await asyncio.wait_for(first.stdout.readline(), 5), b"attempt\n"
+                )
+                async with asyncio.timeout(5):
+                    while not Path(signals, "started").exists():
+                        await asyncio.sleep(0.02)
+                second = await self.launch(action, signals)
+                processes.append(second)
+                self.assertEqual(
+                    await asyncio.wait_for(second.stdout.readline(), 5), b"attempt\n"
+                )
+                await asyncio.sleep(0.15)
+                self.assertIsNone(second.returncode)
+                Path(signals, "release").touch()
+                outputs = await asyncio.wait_for(
+                    asyncio.gather(*(p.communicate() for p in processes)), 10
+                )
+                for p, (out, err) in zip(processes, outputs):
+                    self.assertEqual(p.returncode, 0, err.decode())
+                    json.loads(out)
+                self.assertEqual(Path(signals, "embeddings").read_text(), "batch\n")
+                if action == "delete":
+                    self.assertEqual(await self.service.store.count(), 0)
+                else:
+                    self.assertFalse(json.loads(outputs[1][0])["changed"])
             finally:
-                process.terminate()
-                await asyncio.to_thread(process.wait, 15)
+                for p in processes:
+                    if p.returncode is None:
+                        p.kill()
+                        await p.wait()
 
-    async def test_metadata_updates_keep_embeddings_identity_sections_and_feedback(self):
-        from core.pipeline.documents import DocumentRequest, DocumentSection, upsert_document
-        from unittest.mock import Mock, AsyncMock
-        from datetime import datetime, timezone
-        embed=Mock(get_model_name=lambda:'test',get_dimension=lambda:768,chunking_identity=lambda:{}, prepare_document=EmbeddingProvider.prepare_document.__get__(object()),
-                   split_text=lambda text:[text],embed_batch=AsyncMock(side_effect=lambda texts:[[1.]+[0.]*767 for _ in texts]))
-        doc=DocumentRequest(content='Source text',sections=[DocumentSection(ref='p1',text='Evidence one.'),
-            DocumentSection(ref='p2',text='Evidence two.')],metadata={'old':'removed','count':'many','active':'wrong'})
-        first=await upsert_document(self.store,embed,self.settings.chunking_config,'c','1',doc)
-        rows=await self.store.hybrid_search('Evidence',[1.]+[0.]*767)
-        ids={r.chunk.id for r in rows}
-        self.assertTrue(all(r.chunk.vector is None for r in rows))
-        chunk=await self.store.get_chunk(rows[0].chunk.id)
-        self.assertIsInstance(chunk.vector[0],float)
-        query_id=uuid4()
-        await self.tracker.save_retrieval(query_id,'evidence',[{'chunk_id':str(chunk.id),'content':'DO NOT RETAIN','score':.5}],1.)
-        await self.tracker.save_feedback(query_id,9)
-        doc=doc.model_copy(update={'published_at':datetime(2026,1,1,tzinfo=timezone.utc),'title':'New title',
-                                  'metadata':{'count':'many','active':'wrong','new':'value'}})
-        second=await upsert_document(self.store,embed,self.settings.chunking_config,'c','1',doc)
-        self.assertNotEqual(first['revision'],second['revision'])
-        self.assertEqual(second['embeddings_generated'],0)
-        self.assertEqual(embed.embed_batch.await_count,1)
-        rows=await self.store.hybrid_search('Evidence',[1.]+[0.]*767,filter_dict={'collection':['c']})
-        self.assertEqual({r.chunk.id for r in rows},ids)
-        self.assertEqual({r.chunk.metadata['section_ref'] for r in rows},{'p1','p2'})
-        self.assertTrue(all(r.chunk.metadata['title']=='New title' and 'old' not in r.chunk.metadata for r in rows))
-        async with self.pool.acquire() as conn:
-            self.assertEqual(await conn.fetchval('SELECT num_feedback FROM embeddings WHERE id=$1',chunk.id),1)
-            self.assertEqual(await conn.fetchval('SELECT retrieval_count FROM embeddings WHERE id=$1',chunk.id),1)
-            self.assertNotIn('DO NOT RETAIN',await conn.fetchval('SELECT response::text FROM queries WHERE query_id=$1',query_id))
-        for filters in ({'count':3},{'active':True}):
-            self.assertEqual(await self.store.vector_search([1.]+[0.]*767,filter_dict=filters),[])
-        # Observation timestamps do not invalidate unchanged web content.
-        again=doc.model_copy(update={'metadata':{**doc.metadata,'scraped_at':'new observation'}})
-        result=await upsert_document(self.store,embed,self.settings.chunking_config,'c','1',again)
-        self.assertFalse(result['changed'])
+    async def test_independent_process_delete_cannot_resurrect_document(self):
+        await self.process_race("delete")
 
-    async def test_delete_waits_for_preparation_and_leaves_no_resurrected_document(self):
-        from core.pipeline.documents import DocumentRequest, upsert_document
-        from unittest.mock import Mock
-        started=asyncio.Event(); release=asyncio.Event()
-        async def embedding(texts):
-            started.set(); await release.wait(); return [[1.]+[0.]*767 for _ in texts]
-        embed=Mock(get_model_name=lambda:'test',get_dimension=lambda:768,chunking_identity=lambda:{}, prepare_document=EmbeddingProvider.prepare_document.__get__(object()),
-                   split_text=lambda text:[text],embed_batch=embedding)
-        pending=asyncio.create_task(upsert_document(self.store,embed,self.settings.chunking_config,'c','1',DocumentRequest(content='Late evidence.')))
-        await asyncio.wait_for(started.wait(),1)
-        # The pool remains entirely available while model work is pending.
-        self.assertEqual(self.pool.get_idle_size(),self.pool.get_size())
-        deletion=asyncio.create_task(self.store.delete_document('c','1'))
-        await asyncio.sleep(0)
-        self.assertFalse(deletion.done())
-        release.set(); await asyncio.gather(pending,deletion)
-        self.assertEqual(await self.store.count(),0)
-        self.assertIsNone(await self.store.get_document_status('c','1'))
+    async def test_independent_process_retry_embeds_only_once(self):
+        await self.process_race("upsert")
 
-    async def test_hybrid_candidate_count_scales_past_fifty(self):
-        chunks=[Chunk(uuid4(),f'Common evidence number {i}',f'candidate-{i}',[1.]+[0.]*767,{'collection':'c'}) for i in range(120)]
-        await self.store.insert_chunks(chunks)
-        rows=await self.store.hybrid_search('Common evidence',[1.]+[0.]*767,top_k=100,filter_dict={'collection':'c'})
-        self.assertEqual(len(rows),100)
-        self.assertTrue(all(row.chunk.vector is None for row in rows))
-
-    async def test_additive_migration_and_bounded_history_pruning_preserve_rated_queries(self):
-        ids=[uuid4() for _ in range(4)]
-        for id in ids:
-            await self.tracker.save_retrieval(id,'history',[],1.)
-        await self.tracker.save_feedback(ids[0],9)
-        async with self.pool.acquire() as conn:
-            await conn.execute("UPDATE queries SET created_at=NOW()-interval '100 days' WHERE query_id=ANY($1::uuid[])",ids[:3])
-            await conn.execute("UPDATE queries SET response=$2::jsonb WHERE query_id=$1",ids[0],json.dumps({'chunks':[{'chunk_id':'old','content':'secret excerpt','score':.5}]}))
-            await conn.execute('ALTER TABLE documents DROP COLUMN embedding_revision')
-            for _ in range(2): await conn.execute((ROOT/'db/003_practical.sql').read_text())
-            response=json.loads(await conn.fetchval('SELECT response::text FROM queries WHERE query_id=$1',ids[0]))
-            self.assertNotIn('content',response['chunks'][0])
-        self.assertEqual((await self.tracker.prune_history(limit=1,dry_run=True))['eligible'],1)
-        self.assertEqual((await self.tracker.prune_history(limit=1))['deleted'],1)
-        self.assertEqual((await self.tracker.prune_history())['deleted'],1)
-        async with self.pool.acquire() as conn:
-            self.assertEqual(set(await conn.fetchval('SELECT array_agg(query_id) FROM queries')),{ids[0],ids[3]})
-            self.assertEqual(await conn.fetchval('SELECT count(*) FROM metrics'),2)
-            self.assertEqual(await conn.fetchval('SELECT count(*) FROM feedback'),1)
-
-
-
-if __name__ == '__main__': unittest.main()
+    async def test_real_stdio_tools_mutations_and_safe_failures(self):
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "tests.process_fixture", "stdio"],
+            cwd=str(ROOT),
+            env={**os.environ, "LASSY_TEST_DSN": self.dsn},
+        )
+        with tempfile.TemporaryFile(mode="w+") as errors:
+            async with (
+                stdio_client(params, errlog=errors) as streams,
+                ClientSession(*streams) as client,
+            ):
+                await client.initialize()
+                self.assertEqual(len((await client.list_tools()).tools), 4)
+                self.assertFalse((await client.call_tool("lassy_status", {})).isError)
+                created = await client.call_tool(
+                    "upsert_document",
+                    {
+                        "collection": "stdio",
+                        "document_id": "1",
+                        "document": {"content": "Synthetic evidence."},
+                    },
+                )
+                self.assertFalse(created.isError)
+                result = await client.call_tool(
+                    "search_knowledge_base", {"query": "evidence"}
+                )
+                self.assertTrue(result.structuredContent["chunks"])
+                for args in (
+                    {"query": "private-error"},
+                    {"query": ["PRIVATE_SOURCE"]},
+                    {"query": "q", "top_k": 101},
+                ):
+                    failed = await client.call_tool("search_knowledge_base", args)
+                    self.assertTrue(failed.isError)
+                    self.assertNotIn("PRIVATE_", str(failed))
+                self.assertFalse(
+                    (
+                        await client.call_tool(
+                            "delete_document",
+                            {"collection": "stdio", "document_id": "1"},
+                        )
+                    ).isError
+                )
+            errors.seek(0)
+            self.assertNotIn("PRIVATE_", errors.read())

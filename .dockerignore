@@ -1,22 +1,10 @@
-# Send only build instructions, dependencies and runtime source to Docker.
 **
 !.dockerignore
 !Dockerfile
-!requirements.txt
+!README.md
 !pyproject.toml
 !uv.lock
-!cli.py
-!api/
-!api/**
-!config/
-!config/**
-!core/
-!core/**
-
-# Exclude generated files and local settings even inside runtime directories.
+!lassy/
+!lassy/**
 **/__pycache__
 **/*.py[cod]
-**/.venv
-**/.cache
-**/.env*
-**/.DS_Store

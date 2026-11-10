@@ -53,18 +53,13 @@ kubectl -n lassy logs deployment/lassy --tail=100
 kubectl -n lassy logs deployment/lassy --previous --tail=100
 ```
 
-If startup reports `Apply db/003_practical.sql before restarting Lassy`, the new
-image reached the database but its required `documents.embedding_revision`
-column is missing. Apply the [documented database upgrade](documents.md) to the
-same database used by `lassy-runtime`, then let the pod retry. To bypass the
-crash-loop backoff after the upgrade, delete only the failed pod; the Deployment
-creates its replacement. Check pod readiness and `/health` before treating the
-rollout as recovered. Argo may need another reconciliation to refresh its health.
+The new package requires `documents.embedding_revision` and the additive
+`db/004_mcp.sql` index identity table. A populated older index also needs explicit
+verified model-identity adoption. Follow the [upgrade guide](documents.md), prepare
+the required pinned snapshots in the mounted cache, and verify readiness before
+resuming writers. Startup uses sanitized diagnostics; check configuration/schema
+and cache paths without printing credentials or source content.
 
-For a minimal schema-only recovery, the required statement is
-`ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_revision TEXT;`.
-Run it in a short transaction with a lock timeout. This retains documents,
-vectors and query history; the full `003_practical.sql` additionally removes
-duplicate source excerpts from historical query snapshots. A schema-only repair
-does not perform that history cleanup. Do not reset the database, reinitialize
-tables, or rebuild the same image to resolve a missing column.
+Do not reset the database or rebuild the same image to repair missing schema or
+models. Image publication and Argo promotion remain separate from database/model
+preparation. Existing historical tracking tables remain available for rollback.

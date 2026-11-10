@@ -21,20 +21,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1=12.2.0
     && useradd --create-home --uid 1000 appuser \
     && install -d -o appuser -g appuser /app/.cache/huggingface
 
-    COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock README.md ./
 
 # Install production dependencies from the current lockfile using prebuilt wheels.
 # BuildKit retains uv's download cache between builds without adding it to the
 # image; copying application code afterward lets source edits reuse this layer.
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --no-build
-# Give the runtime user ownership of the application source files.
-COPY --chown=appuser:appuser api/ ./api/
-COPY --chown=appuser:appuser config/ ./config/
-COPY --chown=appuser:appuser core/ ./core/
-COPY --chown=appuser:appuser cli.py ./cli.py
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --extra api --no-install-project --no-build
+# Install the package after caching the third-party dependencies.
+COPY --chown=appuser:appuser lassy/ ./lassy/
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --extra api
 
 # Use executables from uv's virtual environment and the writable model cache.
-ENV PATH="/app/.venv/bin:$PATH" HF_HOME=/app/.cache/huggingface
+ENV PATH="/app/.venv/bin:$PATH" HF_HOME=/app/.cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 # Run the API without root privileges; document its container-side listening port.
 USER appuser
 EXPOSE 8000
@@ -44,4 +42,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 # Listen on all container interfaces so published ports can reach the API.
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "lassy.api:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "critical"]

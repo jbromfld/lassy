@@ -1,13 +1,16 @@
 {
-	"servers": {
-		"local-kbsearch-server": {
-			"command": "/Users/jbromfield/workspace/local-mcp-server/.venv/bin/python",
-			"args": [
-				"/Users/jbromfield/workspace/local-mcp-server/server.py"
-			],
-			"description": "A set of tools that you can use to search the KB",
-			"type": "stdio"
-		}
-	},
-	"inputs": []
+  "servers": {
+    "lassy": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "-m",
+        "lassy.mcp"
+      ],
+      "env": {
+        "LASSY_ENV_FILE": "${workspaceFolder}/.env",
+        "HF_HOME": "${workspaceFolder}/.cache/huggingface"
+      }
+    }
+  }
 }

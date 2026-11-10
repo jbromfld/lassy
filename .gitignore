@@ -85,11 +85,9 @@ docker-compose-local.yml
 node_modules/
 **/node_modules/
 *.visx
-# Bazel output symlinks
-bazel-*
 
-# Share root extension debugging configuration.
-!/.vscode/
-/.vscode/*
-!/.vscode/launch.json
-!/.vscode/tasks.json
+# Private MCP configuration
+.mcp.json.local
+
+# Existing generated Bazel outputs may be removed independently.
+/bazel-*
