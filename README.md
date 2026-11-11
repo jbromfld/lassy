@@ -1,7 +1,6 @@
+![A digital golden retriever fetching research documents from a glowing library](docs/images/lassy.png)
+
 # Lassy
-
-![A digital golden retriever fetching research documents from a glowing library](docs/images/lassy-retriever.png)
-
 Lassy indexes supplied document text and returns relevant evidence with citations.
 It uses local embeddings, PostgreSQL/pgvector hybrid search, publication recency,
 and optional local cross-encoder reranking. It never generates answers or fetches
