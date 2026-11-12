@@ -18,18 +18,38 @@ def git(*args):
     return subprocess.check_output(['git','-C',str(ROOT),*args],text=True).strip()
 
 
+def image_repository(registry, component, layout=None):
+    """Preserve local paths; use namespace/app-component repositories on Docker Hub."""
+    registry = registry.rstrip("/")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", registry) or "://" in registry:
+        raise ValueError("--registry must be a registry/repository prefix without a URL scheme")
+    parts = registry.split("/")
+    hub = parts[0] in ("docker.io", "index.docker.io", "registry-1.docker.io")
+    layout = layout or ("flat" if hub else "nested")
+    if hub and (len(parts) != 2 or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", parts[1])):
+        raise ValueError("Docker Hub requires --registry docker.io/USER_OR_ORG")
+    if hub and layout != "flat":
+        raise ValueError("Docker Hub requires --repository-layout flat")
+    name = f"{APPLICATION}-{component}" if layout == "flat" else f"{APPLICATION}/{component}"
+    return f"{registry}/{name}"
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--registry',default='127.0.0.1:5001',help='OCI registry hostname[:port] and optional namespace (default: %(default)s)')
     parser.add_argument('--context',default='colima',help='Docker context used to build and push')
     parser.add_argument('--revision',default='HEAD',help='Committed Git revision to build; working-tree edits are excluded')
     parser.add_argument('--platform',default='linux/arm64')
+    parser.add_argument('--repository-layout', choices=['nested', 'flat'], help='Repository naming (default: flat for Docker Hub, nested otherwise)')
     parser.add_argument('--output',type=Path,default=ROOT/'build/release.json')
     args=parser.parse_args()
     
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]*',args.registry) or '://' in args.registry:
-        parser.error('--registry must be a registry/repository prefix without a URL scheme')
-    
+    try:
+        for component in IMAGES:
+            image_repository(args.registry, component, args.repository_layout)
+    except ValueError as error:
+        parser.error(str(error))
+
     commit=git('rev-parse',f'{args.revision}^{{commit}}')
     release={'application':APPLICATION,'platform':args.platform,
         'source':{'repository':f'https://github.com/jbromfld/{APPLICATION}.git','revision':commit},'images':{}}
@@ -43,7 +63,7 @@ def main():
             source.extractall(directory,filter='data')
     
         for component,dockerfile in IMAGES.items():
-            image=f'{args.registry.rstrip("/")}/{APPLICATION}/{component}:{commit}'
+            image=image_repository(args.registry, component, args.repository_layout) + f':{commit}'
             metadata=directory/f'.metadata-{component}.json'
     
             subprocess.run(['docker','--context',args.context,'buildx','build','--platform',args.platform,
